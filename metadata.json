@@ -1,0 +1,8 @@
+{
+  "name": "WaruWenJo Admin",
+  "description": "Specialized Field Force CRM for Medical Sales, Health Tech, and Hospital Procurement tracking with Gemini AI Insights.",
+  "requestFramePermissions": [
+    "geolocation",
+    "camera"
+  ]
+}

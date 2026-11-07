@@ -1,0 +1,11 @@
+-- public.medical_cases has RLS enabled (crm_schema.sql) and, as of
+-- 20260920_crm_role_based_access.sql, only SELECT and UPDATE policies for
+-- CRM staff ("Assigned CRM staff read/update medical cases"). There is no
+-- INSERT policy, so "Convert Lead to Medical Case" was rejected by
+-- Postgres row-level security before it ever reached the table — this is
+-- unrelated to, and does not touch, the patient-account creation flow.
+
+DROP POLICY IF EXISTS "Assigned CRM staff create medical cases" ON public.medical_cases;
+CREATE POLICY "Assigned CRM staff create medical cases" ON public.medical_cases
+  FOR INSERT TO authenticated
+  WITH CHECK (public.crm_has_permission(auth.uid(), 'cases.write'));
