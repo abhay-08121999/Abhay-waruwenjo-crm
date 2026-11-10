@@ -13,7 +13,9 @@ const stage = (stage_id: number, name: string, label: string, checklist: string[
   name,
   label,
   status: 'not_started',
-  checklist,
+  // Checklist starts EMPTY: tasks are ticked manually by staff. (`checklist` arg is the task list, kept for reference only.)
+  checklist: [],
+  checklist_manual: true,
   data,
 } as StageDefinition);
 
@@ -65,7 +67,7 @@ export const toCanonicalWorkflowState = (input: WorkflowState | null | undefined
       ...defaults[key],
       ...existing,
       status: existing.status || (legacyChecklist?.length ? 'in_progress' : 'not_started'),
-      checklist: Array.isArray(existing.checklist) ? existing.checklist : (Array.isArray(legacyChecklist) ? legacyChecklist : defaults[key].checklist),
+      checklist: existing.checklist_manual === true && Array.isArray(existing.checklist) ? existing.checklist : (Array.isArray(legacyChecklist) ? legacyChecklist : []),
       data: {
         ...defaults[key].data,
         ...(existing.data || {}),

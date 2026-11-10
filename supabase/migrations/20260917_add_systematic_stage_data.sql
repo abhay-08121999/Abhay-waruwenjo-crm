@@ -57,7 +57,7 @@ SET workflow_state = COALESCE(workflow_state, '{}'::jsonb)
       'stage4', jsonb_build_object(
         'stage_id', 4, 'name', 'In-House Doctor Interaction', 'label', 'Doctor Inbox',
         'status', CASE WHEN COALESCE(workflow_state->'stage4_checklist', '[]'::jsonb) <> '[]'::jsonb THEN 'in_progress' ELSE 'not_started' END,
-        'checklist', jsonb_build_array('Record Doctor Call Notes', 'Send Personal Email to Patient', 'Complete In-House Doctor Interaction'),
+        'checklist', COALESCE(workflow_state->'stage4_checklist', '[]'::jsonb),
         'data', jsonb_build_object(
           'assigned_doctor_name', COALESCE(workflow_state->'assigned_doctor_name', '""'::jsonb),
           'doctor_inbox_status', COALESCE(workflow_state->'doctor_inbox_status', '""'::jsonb),
@@ -71,13 +71,13 @@ SET workflow_state = COALESCE(workflow_state, '{}'::jsonb)
       'stage5', jsonb_build_object(
         'stage_id', 5, 'name', 'Clinical Qualification & Planning', 'label', 'Clinical',
         'status', CASE WHEN COALESCE(workflow_state->'stage5_checklist', '[]'::jsonb) <> '[]'::jsonb THEN 'in_progress' ELSE 'not_started' END,
-        'checklist', jsonb_build_array('Suggest Hospitals', 'Suggest Surgeons/Specialists', 'Personal Email send by Inhouse doctor to patient', 'Finalize Clinical Recommendation', 'Confirm Clinical Review', 'Generate Clinical Report'),
+        'checklist', COALESCE(workflow_state->'stage5_checklist', '[]'::jsonb),
         'data', jsonb_build_object('assigned_doctor_name', COALESCE(workflow_state->'assigned_doctor_name', '""'::jsonb), 'suggested_hospital', COALESCE(workflow_state->'suggested_hospital', '""'::jsonb), 'suggested_hospitals', COALESCE(workflow_state->'suggested_hospitals', '[]'::jsonb), 'suggested_surgeon', COALESCE(workflow_state->'suggested_surgeon', '""'::jsonb), 'suggested_procedures', COALESCE(workflow_state->'suggested_procedures', '""'::jsonb), 'illness_history', COALESCE(workflow_state->'illness_history', '""'::jsonb), 'clinical_summary', COALESCE(workflow_state->'clinical_summary', '""'::jsonb), 'clinical_doctor_email_sent_at', COALESCE(workflow_state->'clinical_doctor_email_sent_at', 'null'::jsonb), 'clinical_recommendation_finalized', COALESCE(workflow_state->'clinical_recommendation_finalized', 'false'::jsonb), 'clinical_review_confirmed', COALESCE(workflow_state->'clinical_review_confirmed', 'false'::jsonb), 'clinical_review_confirmed_at', COALESCE(workflow_state->'clinical_review_confirmed_at', 'null'::jsonb), 'clinical_review_confirmed_by', COALESCE(workflow_state->'clinical_review_confirmed_by', '""'::jsonb), 'clinical_decision', COALESCE(workflow_state->'clinical_decision', '""'::jsonb))
       ),
       'stage6', jsonb_build_object(
         'stage_id', 6, 'name', 'Financial & Logistics Proposal', 'label', 'BDM Pipeline',
         'status', CASE WHEN COALESCE(workflow_state->'stage6_checklist', '[]'::jsonb) <> '[]'::jsonb THEN 'in_progress' ELSE 'not_started' END,
-        'checklist', jsonb_build_array('Generate Financial Proposal', 'Discuss Travel & Accommodation', 'Address Patient Concerns', 'Generate Proposal PDF', 'Send Proposal Via Mail', 'Confirm Patient Interest Via Call'),
+        'checklist', COALESCE(workflow_state->'stage6_checklist', '[]'::jsonb),
         'data', jsonb_build_object('patient_interest', COALESCE(workflow_state->'patient_interest', '""'::jsonb), 'patient_interest_reason', COALESCE(workflow_state->'patient_interest_reason', '""'::jsonb), 'quotation_details', COALESCE(workflow_state->'quotation_details', '""'::jsonb), 'quotation_items', COALESCE(workflow_state->'quotation_items', '[]'::jsonb), 'travel_accommodation', COALESCE(workflow_state->'travel_accommodation', '""'::jsonb), 'patient_concerns', COALESCE(workflow_state->'patient_concerns', '""'::jsonb), 'financial_proposal_pdf', COALESCE(workflow_state->'financial_proposal_pdf', '""'::jsonb), 'proposal_sent_at', COALESCE(workflow_state->'proposal_sent_at', 'null'::jsonb), 'specialist_consultation_booked', COALESCE(workflow_state->'specialist_consultation_booked', 'false'::jsonb), 'estimated_cost_min', COALESCE(workflow_state->'estimated_cost_min', 'null'::jsonb), 'estimated_cost_max', COALESCE(workflow_state->'estimated_cost_max', 'null'::jsonb), 'estimated_cost_currency', COALESCE(workflow_state->'estimated_cost_currency', '""'::jsonb), 'estimated_cost_notes', COALESCE(workflow_state->'estimated_cost_notes', '""'::jsonb))
       ),
       'stage7', jsonb_build_object(
