@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { getLeadCode } from '../lib/leadCode.ts';
 import { fetchLeads, createLead, updateLeadStatus, updatePatientEnquiry, convertProfileToCase, createConsultationFromEnquiry, fetchActiveDoctors, fetchDoctors, fetchHospitals, updateLeadWorkflow, saveLeadWorkflowState, logAdminActivity, fetchAdminActivityLogs, sendCrmEmail, fetchEnquiryDocuments, createPatientAccountFromEnquiry, uploadEnquiryDocument } from '../services/supabase.ts';
 import { supabase } from '../integrations/supabase/client';
-import { fetchInHouseDoctorUsers, InHouseDoctorUser } from '../services/roles';
+import { fetchInHouseDoctorUsers, InHouseDoctorUser, CrmRole } from '../services/roles';
 import { LeadStatus, Lead, Doctor, Hospital } from '../types.ts';
 import { 
   Search, Filter, MoreVertical, Mail, Phone, Plus, X, Activity, UserPlus, 
@@ -55,7 +55,21 @@ const MOM_FIELDS: [string, string][] = [
 
 type ViewMode = 'TABLE' | 'BOARD';
 
-const PatientLeads: React.FC = () => {
+const IN_HOUSE_DOCTOR_STAGES = [3, 4, 5];
+
+const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
+  // In-House Doctor can only work on stages 3, 4 and 5.
+  const isInHouseDoctorOnly =
+    roles.length > 0 &&
+    roles.every(
+      role =>
+        String(role.key || '').toLowerCase().replace(/[^a-z]/g, '') === 'inhousedoctor' ||
+        String(role.name || '').toLowerCase().replace(/[^a-z]/g, '') === 'inhousedoctor'
+    );
+  const canAccessStage = (stageId: number) =>
+    !isInHouseDoctorOnly || IN_HOUSE_DOCTOR_STAGES.includes(stageId);
+  const clampStageForRole = (stageId: number) =>
+    canAccessStage(stageId) ? stageId : stageId < 3 ? 3 : 5;
   const [leads, setLeads] = useState<Lead[]>([]);
   const [hospitals, setHospitals] = useState<Hospital[]>([]);
   const [doctors, setDoctors] = useState<Doctor[]>([]);
@@ -144,7 +158,7 @@ const PatientLeads: React.FC = () => {
       setShowSpamReasonPicker(false);
       setSpamReason('');
       setLocalWorkflowState(null);
-        setActiveWorkflowStage(Number(selectedLead.workflowStage) || 1);
+        setActiveWorkflowStage(clampStageForRole(Number(selectedLead.workflowStage) || 1));
       const defaultState = {
         stage1_checklist: [],
         duplicate_check_done: false,
@@ -446,6 +460,11 @@ const PatientLeads: React.FC = () => {
     const targetStage = STAGES.find(s => s.id === stage);
     if (!targetStage) {
       toast.error('That workflow stage is unavailable.');
+      return;
+    }
+
+    if (!canAccessStage(stage)) {
+      toast.error('You can only access Stages 3, 4 and 5.');
       return;
     }
 
@@ -2674,7 +2693,8 @@ const PatientLeads: React.FC = () => {
                           <button 
                              key={s.id} 
                              onClick={() => handleStageJump(s.id)}
-                             className="relative z-10 flex flex-col items-center group w-[80px]"
+                             disabled={!canAccessStage(s.id)}
+                             className={`relative z-10 flex flex-col items-center group w-[80px] ${!canAccessStage(s.id) ? 'opacity-40 cursor-not-allowed' : ''}`}
                           >
                              <div className={`w-8 h-8 rounded-xl border-2 transition-all duration-500 flex items-center justify-center font-black text-xs
                                 ${isPast ? 'bg-teal-600 border-teal-100 text-white shadow-lg' : 
@@ -2698,7 +2718,7 @@ const PatientLeads: React.FC = () => {
               <div className="flex items-center justify-between gap-3 px-1">
                  <button
                     onClick={handlePreviousStage}
-                    disabled={activeWorkflowStage <= 1 || isUpdatingWorkflow}
+                    disabled={activeWorkflowStage <= 1 || isUpdatingWorkflow || !canAccessStage(activeWorkflowStage - 1)}
                     className="flex items-center gap-2 px-4 py-2.5 bg-white text-slate-600 border border-slate-200 rounded-xl text-[10px] font-black uppercase tracking-widest hover:border-teal-300 hover:text-teal-700 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
                  >
                     <ChevronLeft size={15} /> Previous Stage

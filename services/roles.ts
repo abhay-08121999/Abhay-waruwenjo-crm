@@ -1181,6 +1181,56 @@ export const isSuperAdmin = (
    ROUTE ACCESS CHECK
 ============================================================ */
 
+/*
+ * Routes that are explicitly blocked for a role, regardless of the
+ * permissions stored in Supabase or the defaults in code.
+ * WaruBuddy and CDM (see lists below): Dashboard, Patient Leads, Consent Center,
+ * Medical Leads and Sales Pipeline.
+ */
+const ROLE_BLOCKED_ROUTES: Record<string, string[]> = {
+  waru_buddy: [
+    '#/',
+    '#/patient-leads',
+    '#/consent',
+    '#/leads',
+    '#/pipeline',
+  ],
+  // CDM: Dashboard, Patient Leads, Consent Center, Medical Leads,
+  // Sales Pipeline and Analytics.
+  cdm: [
+    '#/',
+    '#/patient-leads',
+    '#/consent',
+    '#/leads',
+    '#/pipeline',
+    '#/reports',
+  ],
+  // In-House Doctor: Dashboard, Consent Center, Medical Leads,
+  // Sales Pipeline and Patient Journey.
+  in_house_doctor: [
+    '#/',
+    '#/consent',
+    '#/leads',
+    '#/pipeline',
+    '#/patients',
+  ],
+};
+
+const isRouteBlockedForRoles = (
+  roles: CrmRole[],
+  path: string,
+) =>
+  roles.length > 0 &&
+  roles.every(role => {
+    const keyTarget = normalizeRoleName(role.key);
+    const nameTarget = normalizeRoleName(role.name);
+    const match = Object.keys(ROLE_BLOCKED_ROUTES).find(definedKey => {
+      const normalized = normalizeRoleName(definedKey);
+      return normalized === keyTarget || normalized === nameTarget;
+    });
+    return Boolean(match && ROLE_BLOCKED_ROUTES[match].includes(path));
+  });
+
 export const canAccessRoute = (
   roles: CrmRole[],
   permissions: Record<
@@ -1201,6 +1251,13 @@ export const canAccessRoute = (
     )
   ) {
     return true;
+  }
+
+  /*
+   * Role-specific blocked routes (e.g. WaruBuddy).
+   */
+  if (isRouteBlockedForRoles(roles, path)) {
+    return false;
   }
 
   const required =

@@ -1,4 +1,3 @@
-
 import React from 'react';
 import { NAVIGATION } from '../constants.tsx';
 import { Menu, X, Activity, ShieldCheck } from 'lucide-react';
@@ -19,12 +18,31 @@ const Sidebar: React.FC<SidebarProps> = ({
 
   // Remove User Management from NAVIGATION to prevent duplicate links.
   // The dedicated User & Role Management link below is retained.
+  // WaruBuddy can only see these menu items.
+  const WARU_BUDDY_ALLOWED_PATHS = [
+    '#/travel-mgmt',
+    '#/communications',
+    '#/whatsapp',
+    '#/vault',
+    '#/logistics',
+    '#/patients',
+  ];
+
+  const isWaruBuddyOnly =
+    roles.length > 0 &&
+    roles.every(
+      role =>
+        String(role.key || '').toLowerCase().replace(/[^a-z]/g, '') === 'warubuddy' ||
+        String(role.name || '').toLowerCase().replace(/[^a-z]/g, '') === 'warubuddy'
+    );
+
   const navigation = NAVIGATION.filter(
     item =>
       item.path !== '#/crm-users' &&
       item.name !== 'User Management' &&
       item.name !== 'User & Role Management' &&
-      canAccessRoute(roles, permissions, item.path)
+      canAccessRoute(roles, permissions, item.path) &&
+      (!isWaruBuddyOnly || WARU_BUDDY_ALLOWED_PATHS.includes(item.path))
   );
 
   const showUserManagement =

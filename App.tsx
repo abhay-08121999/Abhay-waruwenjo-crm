@@ -247,7 +247,7 @@ const App: React.FC = () => {
       case '#/doctors':
         return <Doctors />;
       case '#/patient-leads':
-        return <PatientLeads />;
+        return <PatientLeads roles={currentRoles} />;
       case '#/automation':
         return <LeadAutomation />;
       case '#/bridge':
