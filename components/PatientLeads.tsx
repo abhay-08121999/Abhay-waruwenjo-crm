@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { fetchLeads, createLead, updateLeadStatus, updatePatientEnquiry, convertProfileToCase, createConsultationFromEnquiry, fetchActiveDoctors, fetchDoctors, fetchHospitals, updateLeadWorkflow, saveLeadWorkflowState, logAdminActivity, fetchAdminActivityLogs, sendCrmEmail, fetchEnquiryDocuments, createPatientAccountFromEnquiry, uploadEnquiryDocument } from '../services/supabase.ts';
 import { supabase } from '../integrations/supabase/client';
+import { fetchInHouseDoctorUsers, InHouseDoctorUser } from '../services/roles';
 import { LeadStatus, Lead, Doctor, Hospital } from '../types.ts';
 import { 
   Search, Filter, MoreVertical, Mail, Phone, Plus, X, Activity, UserPlus, 
@@ -64,14 +65,13 @@ const PatientLeads: React.FC = () => {
   const [selectedInHouseDoctor, setSelectedInHouseDoctor] = useState('');
   const [doctorReportPdf, setDoctorReportPdf] = useState<string | null>(null);
   const [clinicalNotesPdf, setClinicalNotesPdf] = useState<string | null>(null);
-  const IN_HOUSE_DOCTORS = ['Dr. Rajesh Kumar', 'Dr. Priya Sharma', 'Dr. Amit Patel', 'Dr. Sarah Khan', 'Dr. Vikram Singh'];
-  const IN_HOUSE_DOCTOR_EMAILS: Record<string, string> = {
-    'Dr. Rajesh Kumar': 'rajesh.kumar@waruwenjo.com',
-    'Dr. Priya Sharma': 'priya.sharma@waruwenjo.com',
-    'Dr. Amit Patel': 'amit.patel@waruwenjo.com',
-    'Dr. Sarah Khan': 'sarah.khan@waruwenjo.com',
-    'Dr. Vikram Singh': 'vikram.singh@waruwenjo.com'
-  };
+  // Live list of CRM users with the in_house_doctor role (loaded from Supabase).
+  const [inHouseDoctors, setInHouseDoctors] = useState<InHouseDoctorUser[]>([]);
+  const [inHouseDoctorsLoaded, setInHouseDoctorsLoaded] = useState(false);
+  const IN_HOUSE_DOCTORS = inHouseDoctors.map(d => d.name);
+  const IN_HOUSE_DOCTOR_EMAILS: Record<string, string> = Object.fromEntries(
+    inHouseDoctors.filter(d => d.email).map(d => [d.name, d.email])
+  );
 
   const [isUpdatingWorkflow, setIsUpdatingWorkflow] = useState(false);
   const [isConvertingToCase, setIsConvertingToCase] = useState(false);
@@ -1179,8 +1179,9 @@ const PatientLeads: React.FC = () => {
     setSelectedInHouseDoctor(doctorName);
     
     // 1. Update the official assigned_to field (UUID-only in some schemas)
+    const inHouseMatch = inHouseDoctors.find(d => d.name === doctorName);
     const matchedDoctor = doctors.find(d => d.name.toLowerCase().includes(doctorName.toLowerCase()));
-    const valueToSave = matchedDoctor ? matchedDoctor.id : doctorName;
+    const valueToSave = inHouseMatch ? inHouseMatch.userId : (matchedDoctor ? matchedDoctor.id : doctorName);
     
     await updatePatientEnquiry(selectedLead.id, { assigned_to: valueToSave });
     
@@ -1478,7 +1479,7 @@ const PatientLeads: React.FC = () => {
     toast.loading(`Sending reports to Dr. ${doctorName}...`, { id: 'doctor_email_toast' });
 
     const doctorMatch = doctors.find(d => d.name.toLowerCase().includes(doctorName.toLowerCase()));
-    const targetEmail = doctorMatch?.email || IN_HOUSE_DOCTOR_EMAILS[doctorName] || 'trionsv123@gmail.com';
+    const targetEmail = IN_HOUSE_DOCTOR_EMAILS[doctorName] || doctorMatch?.email || 'trionsv123@gmail.com';
 
     try {
       const response = await fetch('/api/send-doctor-reports', {
@@ -1837,7 +1838,15 @@ const PatientLeads: React.FC = () => {
     loadLeads();
     loadDoctors();
     loadHospitals();
+    loadInHouseDoctors();
   }, []);
+
+  const loadInHouseDoctors = async () => {
+    const { data, error } = await fetchInHouseDoctorUsers();
+    if (error) toast.error('Could not load in-house doctors from Supabase');
+    setInHouseDoctors(data);
+    setInHouseDoctorsLoaded(true);
+  };
 
   const loadDoctors = async () => {
     const { data } = await fetchDoctors();
@@ -2657,9 +2666,11 @@ const PatientLeads: React.FC = () => {
                                   value={selectedInHouseDoctor}
                                   onChange={(e) => setSelectedInHouseDoctor(e.target.value)}
                                 >
-                                  <option value="">Select In-House Doctor...</option>
+                                  <option value="">{inHouseDoctorsLoaded && !IN_HOUSE_DOCTORS.length ? 'No in-house doctors found' : 'Select In-House Doctor...'}</option>
+                                  {selectedInHouseDoctor && !IN_HOUSE_DOCTORS.includes(selectedInHouseDoctor) && <option value={selectedInHouseDoctor}>{selectedInHouseDoctor} (current)</option>}
                                   {IN_HOUSE_DOCTORS.map(doc => <option key={doc} value={doc}>{doc}</option>)}
                                 </select>
+                                {inHouseDoctorsLoaded && !IN_HOUSE_DOCTORS.length && <p className="text-[10px] font-bold text-amber-700">Create a CRM user with the "in_house_doctor" role (User Management) and they will appear here.</p>}
                                 <button onClick={assignToInHouseDoctorInbox} className="w-full p-3 bg-indigo-600 text-white rounded-xl font-black text-[10px] uppercase tracking-widest hover:bg-indigo-700">
                                   <Activity size={14} className="inline mr-2" /> Assign to Doctor Inbox
                                 </button>

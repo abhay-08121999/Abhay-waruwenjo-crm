@@ -1037,6 +1037,55 @@ export const fetchCrmUsers =
    UPDATE CRM USER PROFILE
 ============================================================ */
 
+export type InHouseDoctorUser = {
+  userId: string;
+  name: string;
+  email: string;
+};
+
+/**
+ * Live list of active CRM users whose role is `in_house_doctor`.
+ * Used by Patient Leads (Stage 4) so the dropdown follows Supabase instead of a hard-coded list.
+ */
+export const fetchInHouseDoctorUsers = async (): Promise<{
+  data: InHouseDoctorUser[];
+  error: Error | null;
+}> => {
+  const { data: assignments, error: assignmentError } = await supabase
+    .from('crm_user_role_assignments')
+    .select('user_id, role:crm_roles!inner(role_key)')
+    .eq('role.role_key', 'in_house_doctor');
+
+  if (assignmentError) {
+    console.error('In-house doctor lookup failed:', assignmentError);
+    return { data: [], error: assignmentError as unknown as Error };
+  }
+
+  const userIds = Array.from(new Set((assignments || []).map((a: any) => a.user_id).filter(Boolean)));
+  if (!userIds.length) return { data: [], error: null };
+
+  const { data: profiles, error: profileError } = await supabase
+    .from('crm_user_profiles')
+    .select('user_id, email, username, full_name, is_active')
+    .in('user_id', userIds);
+
+  if (profileError) {
+    console.error('In-house doctor profile lookup failed:', profileError);
+    return { data: [], error: profileError as unknown as Error };
+  }
+
+  const doctors = (profiles || [])
+    .filter((profile: any) => profile.is_active !== false)
+    .map((profile: any) => ({
+      userId: String(profile.user_id),
+      name: String(profile.full_name || profile.username || profile.email || 'In-house doctor'),
+      email: String(profile.email || ''),
+    }))
+    .sort((a: InHouseDoctorUser, b: InHouseDoctorUser) => a.name.localeCompare(b.name));
+
+  return { data: doctors, error: null };
+};
+
 export const updateCrmUserProfile =
   async (
     userId: string,
