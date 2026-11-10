@@ -17,6 +17,8 @@ import {
   AlertTriangle,
   Check,
   ChevronDown,
+  Eye,
+  EyeOff,
   Loader2,
   Pencil,
   Plus,
@@ -82,6 +84,7 @@ const CrmUserManagement = () => {
     password: '',
     role_id: '',
   });
+  const [showNewPassword, setShowNewPassword] = useState(false);
 
   const load = async () => {
     setLoading(true);
@@ -327,7 +330,7 @@ const CrmUserManagement = () => {
         return;
       }
 
-      toast.success(`${fullName} was created successfully.`);
+      toast.success(`User created successfully: ${fullName}`);
 
       setUserForm({
         username: '',
@@ -547,19 +550,30 @@ const CrmUserManagement = () => {
 
                 <div>
                   <Label>Password</Label>
-                  <Input
-                    type="password"
-                    className="mt-1"
-                    value={userForm.password}
-                    onChange={(e) =>
-                      setUserForm((current) => ({
-                        ...current,
-                        password: e.target.value,
-                      }))
-                    }
-                    placeholder="Minimum 8 characters"
-                    disabled={saving === 'create-user'}
-                  />
+                  <div className="relative mt-1">
+                    <Input
+                      type={showNewPassword ? 'text' : 'password'}
+                      className="pr-10"
+                      value={userForm.password}
+                      onChange={(e) =>
+                        setUserForm((current) => ({
+                          ...current,
+                          password: e.target.value,
+                        }))
+                      }
+                      placeholder="Minimum 8 characters"
+                      disabled={saving === 'create-user'}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowNewPassword((value) => !value)}
+                      className="absolute inset-y-0 right-0 flex items-center px-3 text-slate-400 hover:text-slate-700"
+                      aria-label={showNewPassword ? 'Hide password' : 'Show password'}
+                      tabIndex={-1}
+                    >
+                      {showNewPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
                 </div>
               </div>
 

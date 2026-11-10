@@ -364,6 +364,21 @@ const invokeRoleFunction = async (
  * attaches the authenticated session to these database
  * requests.
  */
+// Matches a stored role to its code definition by key or name, ignoring case, underscores and spaces
+// (so "waru_buddy", "warubuddy" and "WaruBuddy" all match).
+const normalizeRoleName = (value: string) =>
+  String(value || '').toLowerCase().replace(/[^a-z]/g, '');
+
+const codeDefaultPermissionsFor = (role: CrmRole): CrmPermission[] => {
+  const keyTarget = normalizeRoleName(role.key);
+  const nameTarget = normalizeRoleName(role.name);
+  const match = Object.keys(CRM_ROLE_ROUTE_ACCESS).find((definedKey) => {
+    const normalized = normalizeRoleName(definedKey);
+    return normalized === keyTarget || normalized === nameTarget;
+  });
+  return match ? CRM_ROLE_ROUTE_ACCESS[match] : [];
+};
+
 export const getMyCrmAccess = async (
   userId: string,
 ) => {
@@ -604,6 +619,14 @@ export const getMyCrmAccess = async (
           }
         },
       );
+
+      // Permissions defined for this role in code also apply, so module access matches the role
+      // definition even when the stored role record is missing some of them (e.g. WaruBuddy).
+      codeDefaultPermissionsFor(role).forEach(
+        permission => {
+          permissions[permission] = true;
+        },
+      );
     }
 
     /* -----------------------------------------------
@@ -832,11 +855,48 @@ export const createCrmUser =
     email: string;
     password: string;
     role_id: string;
-  }) =>
-    invokeRoleFunction({
-      action: 'create_user',
-      ...input,
-    });
+  }) => {
+    try {
+      const { data, error } = await supabase.functions.invoke(
+        'create-crm-user',
+        {
+          body: {
+            action: 'create_user',
+            ...input,
+          },
+        },
+      );
+
+      if (error) {
+        // supabase-js hides the real reason behind a generic message for non-2xx responses.
+        // Read the actual error text returned by the function.
+        let message = error.message || 'Unable to create CRM user.';
+        const response = (error as any).context;
+        if (response && typeof response.json === 'function') {
+          try {
+            const body = await response.json();
+            if (body?.error) message = String(body.error);
+          } catch {
+            // keep the default message
+          }
+        }
+        console.error('create-crm-user failed:', message, error);
+        return { data: null, error: new Error(message) };
+      }
+
+      if (data && typeof data === 'object' && 'error' in data && (data as any).error) {
+        return { data: null, error: new Error(String((data as any).error)) };
+      }
+
+      return { data, error: null };
+    } catch (err) {
+      console.error('create-crm-user invocation failed:', err);
+      return {
+        data: null,
+        error: err instanceof Error ? err : new Error('Unable to create CRM user.'),
+      };
+    }
+  };
 
 /* ============================================================
    ASSIGN CRM ROLE

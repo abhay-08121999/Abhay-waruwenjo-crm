@@ -5,6 +5,7 @@ import { jsPDF } from 'jspdf';
 import html2canvas from 'html2canvas';
 import { toast } from 'sonner';
 import Tesseract from 'tesseract.js';
+import { sendQuotationEmail } from '../../lib/quotationEmail';
 
 // Helper to parse line items robustly from PDF/OCR text
 const parseLineItem = (lineText: string) => {
@@ -58,9 +59,10 @@ interface QuotationBuilderProps {
   quotationId: string | null;
   onBack: () => void;
   initialPreview?: boolean;
+  initialLeadId?: string | null;
 }
 
-const QuotationBuilder: React.FC<QuotationBuilderProps> = ({ quotationId, onBack, initialPreview = false }) => {
+const QuotationBuilder: React.FC<QuotationBuilderProps> = ({ quotationId, onBack, initialPreview = false, initialLeadId = null }) => {
   const [loading, setLoading] = useState(false);
   const [leads, setLeads] = useState<any[]>([]);
   const [templates, setTemplates] = useState<any[]>([]);
@@ -74,6 +76,7 @@ const QuotationBuilder: React.FC<QuotationBuilderProps> = ({ quotationId, onBack
   
   // Form State
   const [leadId, setLeadId] = useState('');
+  const [savedQuotationId, setSavedQuotationId] = useState<string | null>(null);
   const [type, setType] = useState('clinical');
   const [templateId, setTemplateId] = useState('');
   const [currency, setCurrency] = useState('INR');
@@ -172,6 +175,11 @@ const QuotationBuilder: React.FC<QuotationBuilderProps> = ({ quotationId, onBack
     }
   }, [quotationId]);
 
+  // New quotation opened from a patient lead: pre-select that patient.
+  useEffect(() => {
+    if (!quotationId && initialLeadId) setLeadId(initialLeadId);
+  }, [quotationId, initialLeadId]);
+
   // Auto-trigger preview when initialPreview is true and quotation data is loaded
   const [previewTriggered, setPreviewTriggered] = useState(false);
   useEffect(() => {
@@ -181,8 +189,40 @@ const QuotationBuilder: React.FC<QuotationBuilderProps> = ({ quotationId, onBack
     }
   }, [initialPreview, loading, quotationId, templateId, previewTriggered]);
 
+  // Adds the Stage 6 "Travel, Logistics & Additional Terms" and "Address Patient Concerns"
+  // entered on the patient lead into the quotation HTML.
+  const fillStage6Details = (html: string, leadRecord: any) => {
+    let state = leadRecord?.workflow_state;
+    if (typeof state === 'string') {
+      try { state = JSON.parse(state); } catch { state = null; }
+    }
+    const stage6 = state?.stage_data?.stage6?.data || {};
+    const escapeText = (value: string) =>
+      value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    const travel = String(stage6.travel_accommodation || '').trim();
+    const concerns = String(stage6.patient_concerns || '').trim();
+
+    const hasPlaceholders = /{{travel_logistics}}|{{patient_concerns}}/.test(html);
+    let out = html
+      .replace(/{{travel_logistics}}/g, escapeText(travel) || '—')
+      .replace(/{{patient_concerns}}/g, escapeText(concerns) || '—');
+
+    // Templates without these placeholders get a section added at the end
+    if (!hasPlaceholders && (travel || concerns)) {
+      const section = `
+        <div style="margin-top: 28px; padding: 0 8px;">
+          ${travel ? `<h3 style="font-size: 13px; font-weight: 700; color: #0d7a6e; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px;">Travel, Logistics &amp; Additional Terms</h3>
+          <p style="font-size: 14px; color: #1e293b; white-space: pre-wrap; margin-bottom: 18px;">${escapeText(travel)}</p>` : ''}
+          ${concerns ? `<h3 style="font-size: 13px; font-weight: 700; color: #0d7a6e; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px;">Address Patient Concerns</h3>
+          <p style="font-size: 14px; color: #1e293b; white-space: pre-wrap;">${escapeText(concerns)}</p>` : ''}
+        </div>`;
+      out = out.includes('</body>') ? out.replace('</body>', `${section}</body>`) : out + section;
+    }
+    return out;
+  };
+
   const fetchFormData = async () => {
-    const { data: leadsData } = await supabase.from('patient_enquiries').select('id, name:full_name, status, email');
+    const { data: leadsData } = await supabase.from('patient_enquiries').select('id, name:full_name, status, email, workflow_state');
     const { data: templatesData } = await supabase.from('templates').select('id, name, type');
     if (leadsData) setLeads(leadsData);
     if (templatesData) setTemplates(templatesData);
@@ -211,7 +251,7 @@ const QuotationBuilder: React.FC<QuotationBuilderProps> = ({ quotationId, onBack
   const handleSave = async (silent = false, overrideItems?: {id: string, name: string, price: number, qty: number}[], overrides?: {leadId?: string, templateId?: string, type?: string, currency?: string}) => {
     setLoading(true);
     try {
-      let qId = quotationId;
+      let qId = quotationId || savedQuotationId;
       const saveItems = overrideItems || items;
       const saveTotalAmount = saveItems.reduce((sum, item) => sum + (item.price * item.qty), 0);
       
@@ -225,11 +265,15 @@ const QuotationBuilder: React.FC<QuotationBuilderProps> = ({ quotationId, onBack
       };
 
       if (qId) {
-        await supabase.from('quotations').update(payload).eq('id', qId);
-        await supabase.from('quotation_items').delete().eq('quotation_id', qId);
+        const { error: updateError } = await supabase.from('quotations').update(payload).eq('id', qId);
+        if (updateError) throw new Error(`Update failed: ${updateError.message}`);
+        const { error: deleteError } = await supabase.from('quotation_items').delete().eq('quotation_id', qId);
+        if (deleteError) throw new Error(`Clearing old items failed: ${deleteError.message}`);
       } else {
-        const { data } = await supabase.from('quotations').insert([payload]).select().single();
-        if (data) qId = data.id;
+        const { data, error: insertError } = await supabase.from('quotations').insert([payload]).select().single();
+        if (insertError) throw new Error(`Insert failed: ${insertError.message}`);
+        qId = data.id;
+        setSavedQuotationId(data.id);
       }
 
       if (qId && saveItems.length > 0) {
@@ -240,7 +284,8 @@ const QuotationBuilder: React.FC<QuotationBuilderProps> = ({ quotationId, onBack
           quantity: item.qty,
           total_price: item.price * item.qty
         }));
-        await supabase.from('quotation_items').insert(itemPayloads);
+        const { error: itemsError } = await supabase.from('quotation_items').insert(itemPayloads);
+        if (itemsError) throw new Error(`Saving items failed: ${itemsError.message}`);
       }
       
       if (!silent) {
@@ -248,9 +293,9 @@ const QuotationBuilder: React.FC<QuotationBuilderProps> = ({ quotationId, onBack
         onBack();
       }
       return qId;
-    } catch (err) {
-      console.error(err);
-      toast.error('Failed to save quotation.');
+    } catch (err: any) {
+      console.error('Save quotation error:', err);
+      toast.error(`Failed to save quotation: ${err?.message || 'unknown error'}`);
       return null;
     } finally {
       setLoading(false);
@@ -268,6 +313,12 @@ const QuotationBuilder: React.FC<QuotationBuilderProps> = ({ quotationId, onBack
   }, [uploadTrigger]);
 
   const handleSend = async () => {
+    const recipient = leads.find(l => l.id === leadId);
+    if (!recipient?.email) {
+      toast.error('Select a patient that has an email address before sending.');
+      return;
+    }
+
     const qId = await handleSave(true);
     if (!qId) return;
 
@@ -310,6 +361,7 @@ const QuotationBuilder: React.FC<QuotationBuilderProps> = ({ quotationId, onBack
         .replace(/{{items}}/g, itemRows)
         .replace(/{{currency}}/g, CURRENCY_SYMBOLS[currency] || currency)
         .replace(/{{total_amount}}/g, totalAmount.toLocaleString());
+      html = fillStage6Details(html, selectedLead);
 
       // Generate PDF
       const doc = new jsPDF('p', 'mm', 'a4');
@@ -337,15 +389,36 @@ const QuotationBuilder: React.FC<QuotationBuilderProps> = ({ quotationId, onBack
       const imgHeight = (canvas.height * imgWidth) / canvas.width;
       
       doc.addImage(imgData, 'PNG', 0, 0, imgWidth, imgHeight);
-      doc.save(`Quotation_${patientName.replace(/\s+/g, '_')}_${new Date().getTime()}.pdf`);
-      
+      const pdfBlob = doc.output('blob');
       document.body.removeChild(container);
 
-      toast.success(`Quotation generated for ${patientName}`);
+      // Store the PDF with the quotation so the patient lead can show it
+      const pdfPath = `${qId}/quotation-${Date.now()}.pdf`;
+      const { error: uploadError } = await supabase.storage
+        .from('quotation-pdfs')
+        .upload(pdfPath, pdfBlob, { contentType: 'application/pdf', upsert: false });
+      if (uploadError) throw uploadError;
+
+      const { error: updateError } = await supabase
+        .from('quotations')
+        .update({ pdf_path: pdfPath, pdf_generated_at: new Date().toISOString() })
+        .eq('id', qId);
+      if (updateError) throw updateError;
+
+      // Email the quotation PDF to the patient (no download)
+      await sendQuotationEmail({
+        toEmail: recipient.email,
+        toName: patientName,
+        pdfBase64: doc.output('datauristring').split(',')[1],
+      });
+
+      await supabase.from('quotations').update({ status: 'sent' }).eq('id', qId);
+
+      toast.success(`Quotation sent to ${patientName}`);
       onBack();
-    } catch (err) {
+    } catch (err: any) {
       console.error('Error sending quotation:', err);
-      toast.error('Failed to generate PDF.');
+      toast.error(`Failed to send quotation: ${err?.message || 'unknown error'}`);
     } finally {
       setLoading(false);
     }
@@ -602,6 +675,7 @@ const QuotationBuilder: React.FC<QuotationBuilderProps> = ({ quotationId, onBack
         .replace(/{{items}}/g, itemRows)
         .replace(/{{currency}}/g, CURRENCY_SYMBOLS[currency] || currency)
         .replace(/{{total_amount}}/g, totalAmount.toLocaleString());
+      html = fillStage6Details(html, selectedLead);
 
       setPreviewHtml(html);
       setShowPreview(true);
@@ -644,7 +718,7 @@ const QuotationBuilder: React.FC<QuotationBuilderProps> = ({ quotationId, onBack
             <Eye size={18} /> {previewLoading ? 'Loading...' : 'Preview'}
           </button>
           <button 
-            onClick={handleSave} 
+            onClick={() => handleSave()} 
             disabled={loading}
             className="flex items-center gap-2 px-6 py-2.5 bg-slate-100 text-slate-700 font-bold rounded-xl hover:bg-slate-200 transition-all"
           >

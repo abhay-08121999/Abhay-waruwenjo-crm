@@ -13,6 +13,15 @@ const PatientDocumentUpload: React.FC<{ leadId: string }> = ({ leadId }) => {
   const [items, setItems] = useState<UploadItem[]>([]);
   const [uploading, setUploading] = useState(false);
   const [message, setMessage] = useState('');
+  // 'form' = upload screen, 'thanks' = just confirmed, 'recorded' = confirmed earlier (page reopened)
+  const storageKey = `documents_confirmed_${leadId}`;
+  const [view, setView] = useState<'form' | 'thanks' | 'recorded'>(() => {
+    try {
+      return localStorage.getItem(storageKey) === '1' ? 'recorded' : 'form';
+    } catch {
+      return 'form';
+    }
+  });
   const inputRef = useRef<HTMLInputElement>(null);
 
   const doneCount = items.filter(i => i.status === 'done').length;
@@ -61,9 +70,82 @@ const PatientDocumentUpload: React.FC<{ leadId: string }> = ({ leadId }) => {
     setMessage(
       failed
         ? `${ok} uploaded, ${failed} failed. Fix or remove the failed file(s) and press upload again.`
-        : `${ok} document${ok === 1 ? '' : 's'} uploaded. You can add more documents below.`
+        : `${ok} document${ok === 1 ? '' : 's'} uploaded. Add more, or press Confirm when you are done.`
     );
   };
+
+  const confirmDocuments = () => {
+    try {
+      localStorage.setItem(storageKey, '1');
+    } catch {
+      // Storage may be blocked; the thank-you screen still shows for this visit.
+    }
+    setView('thanks');
+  };
+
+  // Closes this page and returns the patient to their email inbox.
+  // Browsers only allow closing a tab that was opened by a script or a link, so if the tab
+  // stays open we send the patient to their inbox instead.
+  const exitToEmail = () => {
+    window.close();
+    setTimeout(() => {
+      window.location.href = 'https://mail.google.com/mail/u/0/#inbox';
+    }, 300);
+  };
+
+  if (view === 'recorded') {
+    return (
+      <main className="min-h-screen bg-slate-950 flex items-center justify-center p-6">
+        <section className="w-full max-w-xl bg-white rounded-[2rem] p-8 shadow-2xl text-center">
+          <div className="w-14 h-14 mx-auto rounded-2xl bg-emerald-100 text-emerald-700 flex items-center justify-center mb-5">
+            <CheckCircle2 size={28} />
+          </div>
+          <h1 className="text-2xl font-black text-slate-900">Your response is recorded</h1>
+          <p className="text-sm text-slate-500 mt-3">
+            Thank you. We have your documents, and our clinical team will review them and get back to you shortly.
+          </p>
+          <button
+            onClick={exitToEmail}
+            className="mt-8 w-full py-4 rounded-2xl bg-teal-600 text-white font-black uppercase tracking-widest hover:bg-teal-700 transition-all"
+          >
+            Exit
+          </button>
+        </section>
+      </main>
+    );
+  }
+
+  if (view === 'thanks') {
+    return (
+      <main className="min-h-screen bg-slate-950 flex items-center justify-center p-6">
+        <section className="w-full max-w-xl bg-white rounded-[2rem] p-8 shadow-2xl text-center">
+          <div className="w-14 h-14 mx-auto rounded-2xl bg-emerald-100 text-emerald-700 flex items-center justify-center mb-5">
+            <CheckCircle2 size={28} />
+          </div>
+          <h1 className="text-2xl font-black text-slate-900">Thank you!</h1>
+          <p className="text-sm text-slate-500 mt-3">
+            We have received {doneCount} document{doneCount === 1 ? '' : 's'}. Our clinical team will review them and get back to you shortly.
+          </p>
+          <div className="mt-8 grid grid-cols-2 gap-3">
+            <button
+              onClick={() => setView('form')}
+              className="w-full py-4 rounded-2xl bg-slate-100 text-slate-700 font-black uppercase tracking-widest hover:bg-slate-200 transition-all"
+            >
+              Back
+            </button>
+            <button
+              onClick={exitToEmail}
+              className="w-full py-4 rounded-2xl bg-teal-600 text-white font-black uppercase tracking-widest hover:bg-teal-700 transition-all"
+            >
+              Exit
+            </button>
+          </div>
+        </section>
+      </main>
+    );
+  }
+
+  const readyToConfirm = doneCount > 0 && toUpload.length === 0 && !uploading;
 
   return (
     <main className="min-h-screen bg-slate-950 flex items-center justify-center p-6">
@@ -126,17 +208,26 @@ const PatientDocumentUpload: React.FC<{ leadId: string }> = ({ leadId }) => {
 
         {message && <p className={`text-sm mt-4 ${message.includes('failed') || message.startsWith('Add at least') ? 'text-rose-600' : 'text-slate-600'}`}>{message}</p>}
 
-        <button
-          onClick={submit}
-          disabled={uploading || toUpload.length === 0}
-          className="mt-6 w-full py-4 rounded-2xl bg-teal-600 text-white font-black uppercase tracking-widest disabled:opacity-60"
-        >
-          {uploading
-            ? <><Loader2 className="inline mr-2 animate-spin" size={16} /> Uploading...</>
-            : toUpload.length
-              ? `Upload ${toUpload.length} document${toUpload.length === 1 ? '' : 's'}`
-              : 'Upload documents'}
-        </button>
+        {readyToConfirm ? (
+          <button
+            onClick={confirmDocuments}
+            className="mt-6 w-full py-4 rounded-2xl bg-teal-600 text-white font-black uppercase tracking-widest hover:bg-teal-700 transition-all"
+          >
+            Confirm
+          </button>
+        ) : (
+          <button
+            onClick={submit}
+            disabled={uploading || toUpload.length === 0}
+            className="mt-6 w-full py-4 rounded-2xl bg-teal-600 text-white font-black uppercase tracking-widest disabled:opacity-60"
+          >
+            {uploading
+              ? <><Loader2 className="inline mr-2 animate-spin" size={16} /> Uploading...</>
+              : toUpload.length
+                ? `Upload ${toUpload.length} document${toUpload.length === 1 ? '' : 's'}`
+                : 'Upload documents'}
+          </button>
+        )}
       </section>
     </main>
   );

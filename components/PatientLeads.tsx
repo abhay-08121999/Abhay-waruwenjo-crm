@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { getLeadCode } from '../lib/leadCode.ts';
 import { fetchLeads, createLead, updateLeadStatus, updatePatientEnquiry, convertProfileToCase, createConsultationFromEnquiry, fetchActiveDoctors, fetchDoctors, fetchHospitals, updateLeadWorkflow, saveLeadWorkflowState, logAdminActivity, fetchAdminActivityLogs, sendCrmEmail, fetchEnquiryDocuments, createPatientAccountFromEnquiry, uploadEnquiryDocument } from '../services/supabase.ts';
 import { supabase } from '../integrations/supabase/client';
 import { fetchInHouseDoctorUsers, InHouseDoctorUser } from '../services/roles';
@@ -7,10 +8,11 @@ import {
   Search, Filter, MoreVertical, Mail, Phone, Plus, X, Activity, UserPlus, 
   Calendar, MapPin, Globe, CreditCard, Clock, MessageSquare, CheckCircle2, 
   LayoutGrid, List, AlertTriangle, ChevronRight, User, Hash, FileText,
-  ExternalLink, Info, Stethoscope, ChevronLeft
+  ExternalLink, Info, Stethoscope, ChevronLeft, Pencil
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { generateCallSummary } from '../services/geminiService.ts';
+import LeadQuotationPanel from './LeadQuotationPanel';
 
 class LeadDetailErrorBoundary extends React.Component<{ children: React.ReactNode; onClose: () => void }, { hasError: boolean }> {
   state = { hasError: false };
@@ -39,6 +41,17 @@ class LeadDetailErrorBoundary extends React.Component<{ children: React.ReactNod
     return this.props.children;
   }
 }
+
+const MOM_FIELDS: [string, string][] = [
+  ['mom_date_time', 'Date / time'],
+  ['mom_participants', 'Participants'],
+  ['mom_discussion_points', 'Main discussion points'],
+  ['mom_specialist_observations', 'Specialist observations'],
+  ['mom_patient_questions', 'Patient questions'],
+  ['mom_decisions', 'Decisions'],
+  ['mom_next_steps', 'Next steps'],
+  ['mom_instructions', 'Important instructions'],
+];
 
 type ViewMode = 'TABLE' | 'BOARD';
 
@@ -76,6 +89,22 @@ const PatientLeads: React.FC = () => {
   const [isUpdatingWorkflow, setIsUpdatingWorkflow] = useState(false);
   const [isConvertingToCase, setIsConvertingToCase] = useState(false);
   const [activeWorkflowStage, setActiveWorkflowStage] = useState(1);
+  const detailScrollRef = useRef<HTMLDivElement>(null);
+  // Opens a lead from a card or row. Clears the previous lead first, so the detail pane always
+  // loads the newly clicked lead from scratch (no stale state from the lead opened before).
+  const openLeadDetail = (lead: Lead) => {
+    setShowDetailPane(false);
+    setSelectedLead(null);
+    setLocalWorkflowState(null);
+    setTimeout(() => {
+      setSelectedLead(lead);
+      setShowDetailPane(true);
+    }, 0);
+  };
+  // Show the top of the lead whenever the user moves to another stage
+  useEffect(() => {
+    detailScrollRef.current?.scrollTo({ top: 0, behavior: 'auto' });
+  }, [activeWorkflowStage]);
   const [localWorkflowState, setLocalWorkflowState] = useState<any>(null);
   const workflowStateRef = useRef<any>(null);
   const workflowSaveQueueRef = useRef<Promise<any>>(Promise.resolve());
@@ -85,6 +114,7 @@ const PatientLeads: React.FC = () => {
   const documentFileInputRef = useRef<HTMLInputElement>(null);
   const [callOutcomeDraft, setCallOutcomeDraft] = useState('');
   const [callNotesDraft, setCallNotesDraft] = useState('');
+  const callbackInputRef = useRef<HTMLInputElement>(null);
   const [callbackDateDraft, setCallbackDateDraft] = useState('');
   const [aiSummaryDraft, setAiSummaryDraft] = useState('');
   const [isGeneratingCallSummary, setIsGeneratingCallSummary] = useState(false);
@@ -237,13 +267,23 @@ const PatientLeads: React.FC = () => {
         ...(stage?.data || {}),
         ...(stage?.stage_id ? { [`stage${stage.stage_id}_checklist`]: Array.isArray(stage.checklist) ? stage.checklist : [] } : {}),
       }), {});
+      // Saved stage_data is the source of truth. The top-level workflow fields can hold older
+      // copies, so they must not overwrite what was saved (call notes, AI summary, ticks).
+      const storedFields = Object.fromEntries(
+        Object.entries(stageDataState as Record<string, any>).filter(([, value]) => value !== null && value !== undefined)
+      );
       const hydratedState = {
         ...defaultState,
-        ...stageDataState,
         ...safeWorkflowState,
-        stage2_checklist: Array.isArray(safeWorkflowState.stage2_checklist)
-          ? safeWorkflowState.stage2_checklist.filter((task: string) => task !== 'Schedule Callback if Required')
-          : [],
+        ...storedFields,
+        // Prefer the checklist saved in stage_data (where ticks are written). The top-level
+        // workflow state can hold an older/empty copy, which made ticks look cleared on reopen.
+        stage2_checklist: (Array.isArray((stageDataState as Record<string, any>).stage2_checklist)
+          ? (stageDataState as Record<string, any>).stage2_checklist
+          : Array.isArray(safeWorkflowState.stage2_checklist)
+            ? safeWorkflowState.stage2_checklist
+            : []
+        ).filter((task: string) => task !== 'Schedule Callback if Required'),
         stage3_checklist: Array.from(new Set([
           ...(Array.isArray(stageDataState.stage3_checklist || safeWorkflowState.stage3_checklist) ? (stageDataState.stage3_checklist || safeWorkflowState.stage3_checklist) : []),
           ...(Array.isArray(stageDataState.stage3_checklist || safeWorkflowState.stage3_checklist) && (stageDataState.stage3_checklist || safeWorkflowState.stage3_checklist).includes('Explain Patient Process') && (stageDataState.stage3_checklist || safeWorkflowState.stage3_checklist).includes('Send Medical Document Request Email')
@@ -352,10 +392,10 @@ const PatientLeads: React.FC = () => {
       stage1: stage(1, 'New Lead', 'Triage', 'stage1_checklist', ['duplicate_check_done', 'duplicate_result', 'lead_genuine_decision', 'spam_reason', 'discovery_requirements']),
       stage2: stage(2, 'Contact Attempted', 'Outreach', 'stage2_checklist', ['contact_attempt_count', 'contact_attempts', 'first_contact_at', 'last_attempt_at', 'call_outcome', 'response_outcome', 'call_notes', 'call_summary', 'ai_call_summary', 'callback_date', 'callback_due_at']),
       stage3: stage(3, 'Medical Documents', 'Documents', 'stage3_checklist', ['process_explained_at', 'document_request_sent_at', 'documents_received_count', 'document_request_whatsapp_message']),
-      stage4: stage(4, 'In-House Doctor Interaction', 'Doctor Inbox', 'stage4_checklist', ['assigned_doctor_name', 'doctor_inbox_status', 'doctor_assigned_at', 'doctor_call_notes', 'doctor_call_at', 'personal_email_sent_at', 'initial_doctor_assessment', 'doctor_next_steps', 'doctor_interaction_complete']),
-      stage5: stage(5, 'Clinical Qualification & Planning', 'Clinical', 'stage5_checklist', ['suggested_hospital', 'suggested_surgeon', 'suggested_procedures', 'illness_history', 'clinical_summary', 'clinical_recommendation_finalized', 'clinical_review_confirmed', 'clinical_review_confirmed_at', 'clinical_review_confirmed_by', 'clinical_decision', 'clinical_report_generated_at']),
+      stage4: stage(4, 'In-House Doctor Interaction', 'Doctor Inbox', 'stage4_checklist', ['assigned_doctor_name', 'doctor_inbox_status', 'doctor_assigned_at', 'doctor_call_notes', 'doctor_call_at', 'personal_email_sent_at', 'initial_doctor_assessment', 'doctor_next_steps', 'doctor_interaction_complete', 'doctor_call_notes_saved_at', 'initial_doctor_assessment_saved_at']),
+      stage5: stage(5, 'Clinical Qualification & Planning', 'Clinical', 'stage5_checklist', ['suggested_hospital', 'suggested_hospital_id', 'suggested_surgeon', 'suggested_surgeon_id', 'suggested_procedures', 'illness_history', 'clinical_summary', 'clinical_recommendation_finalized', 'clinical_review_confirmed', 'clinical_review_confirmed_at', 'clinical_review_confirmed_by', 'clinical_decision', 'clinical_report_generated_at']),
       stage6: stage(6, 'Financial & Logistics Proposal', 'BDM Pipeline', 'stage6_checklist', ['quotation_details', 'quotation_items', 'travel_accommodation', 'patient_concerns', 'financial_proposal_pdf', 'proposal_sent_at', 'patient_interest', 'patient_interest_reason', 'estimated_cost_min', 'estimated_cost_max', 'estimated_cost_currency', 'estimated_cost_notes', 'specialist_consultation_booked']),
-      stage7: stage(7, 'Specialist Consultation, Payment & Confirmation', 'Specialist Consult & Payment', 'stage7_checklist', ['specialist_call_completed_at', 'specialist_call_notes', 'mom_date_time', 'mom_participants', 'mom_discussion_points', 'mom_specialist_observations', 'mom_patient_questions', 'mom_decisions', 'mom_next_steps', 'mom_instructions', 'mom_recorded_at', 'bdm_call_completed_at', 'bdm_call_notes', 'quotation_agreement_confirmed', 'clinical_process_agreement_confirmed', 'stage7_patient_decision', 'stage7_disagreement_reason', 'stage7_disagreement_concern', 'stage7_disagreement_followup', 'request_to_proceed_confirmed', 'request_to_proceed_at', 'payment_link', 'payment_reference', 'payment_link_provided_at', 'payment_status', 'payment_date_time', 'payment_amount', 'advance_payment_verified']),
+      stage7: stage(7, 'Specialist Consultation, Payment & Confirmation', 'Specialist Consult & Payment', 'stage7_checklist', ['specialist_call_completed_at', 'specialist_call_notes', 'mom_date_time', 'mom_participants', 'mom_discussion_points', 'mom_specialist_observations', 'mom_patient_questions', 'mom_decisions', 'mom_next_steps', 'mom_instructions', 'mom_recorded_at', 'mom_pdf_path', 'mom_pdf_url', 'bdm_call_completed_at', 'bdm_call_notes', 'quotation_agreement_confirmed', 'clinical_process_agreement_confirmed', 'stage7_patient_decision', 'stage7_disagreement_reason', 'stage7_disagreement_concern', 'stage7_disagreement_followup', 'request_to_proceed_confirmed', 'request_to_proceed_at', 'payment_link', 'payment_reference', 'payment_link_provided_at', 'payment_status', 'payment_date_time', 'payment_amount', 'advance_payment_verified']),
       stage8: stage(8, 'Medical Case Handover', 'CDM/WaruBuddy Handover', 'stage8_checklist', ['medical_case_id', 'converted_at', 'handover_prepared_at', 'patient_user_id', 'patient_patient_id', 'patient_account_created_at', 'patient_account_status', 'patient_account_error', 'patient_invitation_sent_at', 'handover_bdm_name', 'handover_cdm_team', 'handover_status', 'handover_case_information', 'clinical_information_shared', 'financial_information_shared', 'specialist_mom_information_shared', 'handover_initiated_at', 'handover_accepted_at', 'case_ownership_confirmed_at', 'stage8_completed_at']),
       stage9: stage(9, 'Lost / Dropped', 'Archived', 'stage9_checklist', ['dropoff_reason', 'archived_at', 'dropped_from_stage', 'dropped_at', 'resume_stage']),
     };
@@ -372,6 +412,16 @@ const PatientLeads: React.FC = () => {
     const leadId = selectedLead.id;
     const saveOperation = workflowSaveQueueRef.current.then(() => saveLeadWorkflowState(leadId, { stage_data: stageData }));
     workflowSaveQueueRef.current = saveOperation.catch(() => undefined);
+    // Keep the lead list in sync with what was just saved. Otherwise reopening a lead reads the
+    // older copy from the list, and the latest notes, assessments and ticks look missing.
+    saveOperation
+      .then((result: any) => {
+        if (result?.error) return;
+        setLeads(prev => prev.map(lead => lead.id === leadId
+          ? { ...lead, workflowState: { ...(lead.workflowState || {}), stage_data: stageData } }
+          : lead));
+      })
+      .catch(() => undefined);
     return saveOperation;
   };
 
@@ -711,8 +761,133 @@ const PatientLeads: React.FC = () => {
       toast.error('Complete every MOM field before recording the minutes.');
       return;
     }
-    await saveStage7Task('Record MOM', { mom_recorded_at: new Date().toISOString() });
-    toast.success('MOM recorded');
+    if (!selectedLead) return;
+    try {
+      const { jsPDF } = await import('jspdf');
+      const momDoc = new jsPDF('p', 'mm', 'a4');
+      const pageWidth = momDoc.internal.pageSize.getWidth();
+      const pageHeight = momDoc.internal.pageSize.getHeight();
+      const margin = 16;
+      const contentWidth = pageWidth - margin * 2;
+      let y = 0;
+
+      // Branded header, repeated on every page
+      const drawHeader = () => {
+        momDoc.setFillColor(13, 122, 110);
+        momDoc.rect(0, 0, pageWidth, 26, 'F');
+        momDoc.setTextColor(255, 255, 255);
+        momDoc.setFont('helvetica', 'bold');
+        momDoc.setFontSize(16);
+        momDoc.text('WaruWenJo', margin, 12);
+        momDoc.setFont('helvetica', 'normal');
+        momDoc.setFontSize(9);
+        momDoc.text('Medical Tourism Coordination', margin, 18);
+        momDoc.text(`Lead Ref: ${getLeadCode(selectedLead)}`, pageWidth - margin, 12, { align: 'right' });
+        momDoc.setTextColor(30, 41, 59);
+        y = 36;
+      };
+
+      const ensureSpace = (needed: number) => {
+        if (y + needed > pageHeight - 22) {
+          momDoc.addPage();
+          drawHeader();
+        }
+      };
+
+      drawHeader();
+
+      // Title
+      momDoc.setFont('helvetica', 'bold');
+      momDoc.setFontSize(18);
+      momDoc.text('Minutes of Meeting (MOM)', margin, y);
+      y += 6;
+      momDoc.setDrawColor(13, 122, 110);
+      momDoc.setLineWidth(0.6);
+      momDoc.line(margin, y, pageWidth - margin, y);
+      y += 8;
+
+      // Meeting details
+      const details: [string, string][] = [
+        ['Patient', selectedLead.name || '-'],
+        ['Lead Reference', getLeadCode(selectedLead)],
+        ['Date Recorded', new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })],
+      ];
+      details.forEach(([label, value]) => {
+        momDoc.setFont('helvetica', 'bold');
+        momDoc.setFontSize(10);
+        momDoc.text(`${label}:`, margin, y);
+        momDoc.setFont('helvetica', 'normal');
+        momDoc.text(momDoc.splitTextToSize(value, contentWidth - 45), margin + 42, y);
+        y += 7;
+      });
+      y += 2;
+      momDoc.setDrawColor(203, 213, 225);
+      momDoc.setLineWidth(0.3);
+      momDoc.line(margin, y, pageWidth - margin, y);
+      y += 8;
+
+      // Numbered agenda sections
+      MOM_FIELDS.forEach(([field, label], index) => {
+        const value = String(state?.[field] || '-');
+        const lines = momDoc.splitTextToSize(value, contentWidth - 4);
+        ensureSpace(14);
+        momDoc.setFont('helvetica', 'bold');
+        momDoc.setFontSize(11);
+        momDoc.setTextColor(13, 122, 110);
+        momDoc.text(`${index + 1}. ${label}`, margin, y);
+        y += 6;
+        momDoc.setFont('helvetica', 'normal');
+        momDoc.setFontSize(10);
+        momDoc.setTextColor(30, 41, 59);
+        lines.forEach((line: string) => {
+          ensureSpace(6);
+          momDoc.text(line, margin + 4, y);
+          y += 5;
+        });
+        y += 6;
+      });
+
+      // Signature block
+      ensureSpace(50);
+      y += 10;
+      momDoc.setDrawColor(148, 163, 184);
+      momDoc.setLineWidth(0.3);
+      momDoc.line(margin, y + 14, margin + 70, y + 14);
+      momDoc.line(pageWidth - margin - 70, y + 14, pageWidth - margin, y + 14);
+      momDoc.setFont('helvetica', 'bold');
+      momDoc.setFontSize(9);
+      momDoc.setTextColor(30, 41, 59);
+      momDoc.text('Prepared by (Name & Signature)', margin, y + 19);
+      momDoc.text('Specialist / Doctor (Name & Signature)', pageWidth - margin - 70, y + 19);
+
+      // Footer with page numbers on every page
+      const pageCount = momDoc.getNumberOfPages();
+      for (let i = 1; i <= pageCount; i++) {
+        momDoc.setPage(i);
+        momDoc.setFont('helvetica', 'normal');
+        momDoc.setFontSize(8);
+        momDoc.setTextColor(100, 116, 139);
+        momDoc.text('Confidential: for internal and patient use only', margin, pageHeight - 10);
+        momDoc.text(`Page ${i} of ${pageCount}`, pageWidth - margin, pageHeight - 10, { align: 'right' });
+      }
+
+      const momPath = `${selectedLead.id}/mom-${Date.now()}.pdf`;
+      const { error: momUploadError } = await supabase.storage
+        .from('mom-reports')
+        .upload(momPath, momDoc.output('blob'), { contentType: 'application/pdf', upsert: false });
+      if (momUploadError) throw momUploadError;
+      const { data: momPublic } = supabase.storage.from('mom-reports').getPublicUrl(momPath);
+
+      await saveStage7Task('Record MOM', {
+        mom_recorded_at: new Date().toISOString(),
+        mom_pdf_path: momPath,
+        mom_pdf_url: momPublic.publicUrl,
+      });
+      toast.success('MOM recorded and PDF saved');
+    } catch (err: any) {
+      console.error('MOM PDF upload failed:', err);
+      toast.error(`Failed to save MOM PDF: ${err?.message || 'unknown error'}`);
+    }
   };
 
   const handleCompleteBdmCall = async (notes: string) => {
@@ -1048,6 +1223,26 @@ const PatientLeads: React.FC = () => {
     toast.success(`Call attempt ${currentCount + 1} recorded`);
   };
 
+  // Saves only the raw call notes (no outcome needed) and ticks "Record Call Notes"
+  const handleSaveRawCall = async () => {
+    if (!selectedLead) return;
+    const notes = callNotesDraft.trim();
+    if (!notes) {
+      toast.error('Write the raw call notes first.');
+      return;
+    }
+    const checklist = (localWorkflowState?.stage2_checklist || []).filter((task: string) => task !== 'Record Call Notes');
+    const { error } = await persistWorkflowPatch({
+      call_notes: notes,
+      stage2_checklist: [...checklist, 'Record Call Notes'],
+    });
+    if (error) {
+      toast.error('Could not save the raw call notes.');
+      return;
+    }
+    toast.success('Raw call notes saved');
+  };
+
   const handleScheduleCallback = async () => {
     if (!selectedLead || !callbackDateDraft) {
       toast.error('Choose a callback date and time first.');
@@ -1217,12 +1412,38 @@ const PatientLeads: React.FC = () => {
     toast.success('Personal doctor call recorded');
   };
 
+  const handleSaveInitialAssessment = async () => {
+    if (!selectedLead || !localWorkflowState?.initial_doctor_assessment?.trim()) {
+      toast.error('Enter the initial doctor assessment first.');
+      return;
+    }
+    const { error } = await persistWorkflowPatch({
+      initial_doctor_assessment: localWorkflowState.initial_doctor_assessment.trim(),
+      doctor_next_steps: (localWorkflowState.doctor_next_steps || '').trim(),
+      initial_doctor_assessment_saved_at: new Date().toISOString(),
+    });
+    if (error) {
+      toast.error('Could not save the initial assessment.');
+      return;
+    }
+    toast.success('Initial doctor assessment saved');
+  };
+
   const handleSaveDoctorCallNotes = async () => {
     if (!selectedLead || !localWorkflowState?.doctor_call_notes?.trim()) {
       toast.error('Enter the doctor call notes first.');
       return;
     }
-    await saveStage4Task('Record Doctor Call Notes', { doctor_call_notes: localWorkflowState.doctor_call_notes });
+    const checklist = (localWorkflowState.stage4_checklist || []).filter((task: string) => task !== 'Record Doctor Call Notes');
+    const { error } = await persistWorkflowPatch({
+      doctor_call_notes: localWorkflowState.doctor_call_notes.trim(),
+      doctor_call_notes_saved_at: new Date().toISOString(),
+      stage4_checklist: [...checklist, 'Record Doctor Call Notes'],
+    });
+    if (error) {
+      toast.error('Could not save the doctor call notes.');
+      return;
+    }
     toast.success('Doctor call notes saved');
   };
 
@@ -1352,7 +1573,7 @@ const PatientLeads: React.FC = () => {
         y += 10;
       };
       
-      addRow("Ref ID", (lead.id || "PENDING").slice(0, 8).toUpperCase());
+      addRow("Ref ID", getLeadCode(lead));
       addRow("Full Name", lead.name);
       addRow("Email", lead.email);
       addRow("Phone", lead.phone || "Not provided");
@@ -1382,6 +1603,7 @@ const PatientLeads: React.FC = () => {
         body: JSON.stringify({
           lead: {
             id: lead.id,
+            lead_code: lead.leadCode,
             full_name: lead.name,
             email: lead.email,
             phone: lead.phone,
@@ -1439,6 +1661,7 @@ const PatientLeads: React.FC = () => {
         body: JSON.stringify({
           lead: {
             id: lead.id,
+            lead_code: lead.leadCode,
             full_name: lead.name,
             email: lead.email,
             phone: lead.phone
@@ -1488,6 +1711,7 @@ const PatientLeads: React.FC = () => {
         body: JSON.stringify({
           lead: {
             id: lead.id,
+            lead_code: lead.leadCode,
             full_name: lead.name,
             treatment_interest: lead.treatmentInterest
           },
@@ -1596,7 +1820,20 @@ const PatientLeads: React.FC = () => {
 
       const pdfBase64 = doc.output('datauristring').split(',')[1];
       setClinicalNotesPdf(pdfBase64);
-      await persistWorkflowPatch({ clinical_report_generated_at: new Date().toISOString() });
+
+      // Save the report to the clinical-reports bucket so it is kept with the lead
+      const reportPath = `${selectedLead.id}/clinical-report-${Date.now()}.pdf`;
+      const { error: reportUploadError } = await supabase.storage
+        .from('clinical-reports')
+        .upload(reportPath, doc.output('blob'), { contentType: 'application/pdf', upsert: false });
+      if (reportUploadError) throw reportUploadError;
+      const { data: reportPublic } = supabase.storage.from('clinical-reports').getPublicUrl(reportPath);
+
+      await persistWorkflowPatch({
+        clinical_report_generated_at: new Date().toISOString(),
+        clinical_report_path: reportPath,
+        clinical_report_url: reportPublic.publicUrl,
+      });
       
       toast.success('Clinical Report Generated!', { id: 'pdf_gen' });
       
@@ -1612,17 +1849,32 @@ const PatientLeads: React.FC = () => {
       // Open the PDF in a new tab for immediate viewing
       window.open(doc.output('bloburl'), '_blank');
       
-    } catch (err) {
-      toast.error('Failed to generate PDF', { id: 'pdf_gen' });
+    } catch (err: any) {
+      console.error('Clinical report upload failed:', err);
+      toast.error(`Failed to save clinical report: ${err?.message || 'unknown error'}`, { id: 'pdf_gen' });
     }
   };
 
   const generateFinancialProposalPDF = async () => {
     if (!selectedLead) return;
     
-    const items = localWorkflowState?.quotation_items || [];
+    const { data: latestQuotation } = await supabase
+      .from('quotations')
+      .select('id')
+      .eq('lead_id', selectedLead.id)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    let items: any[] = [];
+    if (latestQuotation) {
+      const { data: quotationItems } = await supabase
+        .from('quotation_items')
+        .select('name, quantity, unit_price')
+        .eq('quotation_id', latestQuotation.id);
+      items = (quotationItems || []).map((i: any) => ({ description: i.name, qty: i.quantity, rate: i.unit_price }));
+    }
     if (items.length === 0) {
-      toast.error('Please add at least one quotation item first.');
+      toast.error('Create a quotation for this patient in the Quotations section first.');
       return;
     }
 
@@ -1752,6 +2004,7 @@ const PatientLeads: React.FC = () => {
         body: JSON.stringify({
           lead: {
             id: lead.id,
+            lead_code: lead.leadCode,
             full_name: lead.name,
             email: lead.email,
             treatment_interest: lead.treatmentInterest
@@ -1802,6 +2055,7 @@ const PatientLeads: React.FC = () => {
         body: JSON.stringify({
           lead: {
             id: lead.id,
+            lead_code: lead.leadCode,
             full_name: lead.name,
             email: lead.email
           },
@@ -1866,6 +2120,7 @@ const PatientLeads: React.FC = () => {
     } else {
       const mappedLeads: Lead[] = (data || []).map((item: any) => ({
         id: String(item.id || ''),
+        leadCode: item.lead_code,
         name: item.full_name || 'Unnamed Patient',
         email: item.email,
         phone: item.phone,
@@ -1955,6 +2210,18 @@ const PatientLeads: React.FC = () => {
 
   const handleConvertToCase = async (lead: Lead) => {
     if (isConvertingToCase) return;
+    setIsConvertingToCase(true);
+    try {
+      await runConvertToCase(lead);
+    } catch (err: any) {
+      console.error('Medical case conversion failed:', err);
+      toast.error(`Medical case could not be created: ${err?.message || 'unknown error'}`);
+    } finally {
+      setIsConvertingToCase(false);
+    }
+  };
+
+  const runConvertToCase = async (lead: Lead) => {
     const currentState = workflowStateRef.current || localWorkflowState;
     if (!currentState?.patient_user_id) {
       toast.error('Create and link the patient profile before converting this lead to a medical case.');
@@ -1971,7 +2238,21 @@ const PatientLeads: React.FC = () => {
     try {
       const specialistDoctor = doctors.find((doctor) => doctor.id === currentState.suggested_surgeon_id)
         || doctors.find((doctor) => doctor.name === currentState.suggested_surgeon);
-      const assignedToId = specialistDoctor?.id || currentState.suggested_surgeon_id || null;
+      // medical_cases.assigned_to must be a staff profile id (profiles.id), not a doctors.id.
+      // Match the selected surgeon to the profile with the same email.
+      let assignedToId: string | null = null;
+      if (specialistDoctor?.email) {
+        const { data: staffProfile } = await supabase
+          .from('profiles')
+          .select('id')
+          .eq('email', specialistDoctor.email)
+          .maybeSingle();
+        assignedToId = staffProfile?.id || null;
+      }
+      if (!assignedToId) {
+        toast.error('The selected surgeon has no staff login with the same email. Create a profile for this surgeon, then try again.');
+        return;
+      }
       const selectedHospital = hospitals.find((hospital) => hospital.id === currentState.suggested_hospital_id)
         || hospitals.find((hospital) => hospital.name === currentState.suggested_hospital);
       const hospitalId = selectedHospital?.id || currentState.suggested_hospital_id || null;
@@ -2009,6 +2290,25 @@ const PatientLeads: React.FC = () => {
       toast.error(thrown?.message || 'Medical case could not be created (unexpected error — see console).');
       setIsConvertingToCase(false);
       return;
+    }
+
+    // 409 / unique-violation: the database already has a medical case for this patient.
+    // Link that existing case instead of failing the conversion.
+    const errorCode = String((error as any)?.code ?? '');
+    const isConflict = errorCode === '23505' || /duplicate|unique|409/i.test(String(error?.message || ''));
+    if (error && isConflict && currentState.patient_user_id) {
+      const { data: existingCase } = await supabase
+        .from('medical_cases')
+        .select('id')
+        .eq('patient_id', currentState.patient_user_id)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (existingCase?.id) {
+        caseData = existingCase;
+        error = null;
+        toast.message('A medical case already exists for this patient. It has been linked.');
+      }
     }
 
     if (error || !caseData?.id) {
@@ -2065,11 +2365,7 @@ const PatientLeads: React.FC = () => {
   const LeadCard: React.FC<{ lead: Lead }> = ({ lead }) => (
     <div 
       className="bg-white p-5 rounded-3xl border border-slate-200/80 shadow-sm hover:border-teal-500 hover:-translate-y-1 hover:shadow-xl hover:shadow-teal-500/10 transition-all group relative overflow-visible cursor-pointer mb-4"
-      onClick={() => {
-        setLocalWorkflowState(null);
-        setSelectedLead(lead);
-        setShowDetailPane(true);
-      }}
+      onClick={() => openLeadDetail(lead)}
     >
       <div className={`absolute -top-3 right-8 px-4 py-1.5 rounded-full text-[9px] font-black uppercase tracking-widest border-2 z-10 ${getUrgencyStyles(lead.urgency || 'Standard')}`}>
         {lead.urgency || 'Standard'}
@@ -2270,7 +2566,7 @@ const PatientLeads: React.FC = () => {
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {filteredLeads.map((lead) => (
-                  <tr key={lead.id} className="hover:bg-slate-50 transition-all duration-300 group cursor-pointer" onClick={() => { setLocalWorkflowState(null); setSelectedLead(lead); setShowDetailPane(true); }}>
+                  <tr key={lead.id} className="hover:bg-slate-50 transition-all duration-300 group cursor-pointer" onClick={() => openLeadDetail(lead)}>
                     <td className="px-10 py-8">
                       <div className="flex items-center gap-4">
                         <div className="w-14 h-14 rounded-2xl bg-slate-100 flex items-center justify-center text-slate-500 font-black text-xl group-hover:bg-teal-600 group-hover:text-white transition-all">
@@ -2278,6 +2574,7 @@ const PatientLeads: React.FC = () => {
                         </div>
                         <div>
                           <p className="text-base font-black text-slate-900 leading-tight mb-1">{lead.name}</p>
+                          <p className="text-[10px] font-black text-indigo-500 tracking-widest mb-1">{getLeadCode(lead)}</p>
                           <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest flex items-center gap-1.5"><Mail size={12} /> {lead.email}</p>
                         </div>
                       </div>
@@ -2318,7 +2615,7 @@ const PatientLeads: React.FC = () => {
     {showDetailPane && selectedLead && localWorkflowState && (
     <LeadDetailErrorBoundary onClose={() => setShowDetailPane(false)}>
     <div className="fixed inset-0 z-[200] flex justify-end bg-slate-900/40 backdrop-blur-sm animate-in fade-in duration-300">
-          <div className="w-full max-w-3xl bg-white shadow-2xl h-screen overflow-y-auto animate-in slide-in-from-right duration-500">
+          <div ref={detailScrollRef} className="w-full max-w-3xl bg-white shadow-2xl h-screen overflow-y-auto animate-in slide-in-from-right duration-500">
             <div className="p-8 border-b border-slate-100 flex items-center justify-between sticky top-0 bg-white/80 backdrop-blur-md z-10">
               <div className="flex items-center gap-4">
                 <div className="w-14 h-14 bg-teal-600 text-white rounded-2xl flex items-center justify-center text-2xl font-black">
@@ -2327,7 +2624,7 @@ const PatientLeads: React.FC = () => {
                 <div>
                   <h3 className="text-2xl font-black text-slate-900 tracking-tight">{selectedLead.name}</h3>
                   <div className="flex gap-4 mt-1">
-                    <span className="text-[10px] font-black text-indigo-500 uppercase tracking-widest">Enquiry #{selectedLead.id.slice(0, 8)}</span>
+                    <span className="text-[10px] font-black text-indigo-500 uppercase tracking-widest">Lead {getLeadCode(selectedLead)}</span>
                     <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Received {new Date(selectedLead.createdAt!).toLocaleDateString()}</span>
                   </div>
                 </div>
@@ -2406,7 +2703,6 @@ const PatientLeads: React.FC = () => {
                  >
                     <ChevronLeft size={15} /> Previous Stage
                  </button>
-                 <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest text-right">Going back does not reset completed checklist items</p>
               </div>
 
               {/* STAGE-SPECIFIC WORKSPACE */}
@@ -2584,14 +2880,13 @@ const PatientLeads: React.FC = () => {
                                       {CALL_OUTCOMES.map(outcome => <option key={outcome} value={outcome}>{outcome}</option>)}
                                     </select>
                                   </div>
-                                  <div>
-                                    <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Callback Date & Time</label>
-                                    <input type="datetime-local" value={callbackDateDraft} onChange={(e) => setCallbackDateDraft(e.target.value)} className="w-full mt-2 p-3 bg-slate-50 border border-slate-100 rounded-xl text-xs font-bold outline-none" />
-                                  </div>
                                 </div>
                                 <div>
                                   <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Raw Call Notes</label>
                                   <textarea value={callNotesDraft} onChange={(e) => setCallNotesDraft(e.target.value)} placeholder="What did the patient say? Capture needs, concerns, and next steps..." className="w-full mt-2 p-3 bg-slate-50 border border-slate-100 rounded-xl text-xs font-medium min-h-[100px] outline-none" />
+                                  <div className="flex justify-end mt-2">
+                                    <button type="button" onClick={handleSaveRawCall} className="px-4 py-2 bg-slate-900 text-white rounded-xl font-black text-[10px] uppercase tracking-widest hover:bg-slate-800">Save Raw Call Notes</button>
+                                  </div>
                                 </div>
                                 <button onClick={handleLogFirstCall} className="w-full p-3 bg-slate-900 text-white rounded-xl font-black text-[10px] uppercase tracking-widest hover:bg-slate-800 transition-all">
                                   <Phone size={14} className="inline mr-2" /> Save Call Attempt
@@ -2625,6 +2920,13 @@ const PatientLeads: React.FC = () => {
                                   </div>
                                   {localWorkflowState?.callback_due_at && new Date(localWorkflowState.callback_due_at) < new Date() && <span className="px-2 py-1 bg-rose-50 text-rose-600 rounded-lg text-[9px] font-black uppercase">Due</span>}
                                 </div>
+                                <div className="space-y-2">
+                                  <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Callback Date & Time</label>
+                                  <div className="flex gap-2">
+                                    <input ref={callbackInputRef} type="datetime-local" value={callbackDateDraft} onChange={(e) => setCallbackDateDraft(e.target.value)} className="flex-1 p-3 bg-slate-50 border border-slate-100 rounded-xl text-xs font-bold outline-none" />
+                                    <button type="button" onClick={() => callbackInputRef.current?.showPicker?.()} className="px-4 bg-slate-100 text-slate-700 rounded-xl font-black text-[10px] uppercase tracking-widest hover:bg-slate-200">Calendar</button>
+                                  </div>
+                                </div>
                                 <button onClick={handleScheduleCallback} className="w-full p-3 bg-amber-50 text-amber-700 border border-amber-100 rounded-xl font-black text-[10px] uppercase tracking-widest hover:bg-amber-100">Schedule Callback</button>
                                 {!localWorkflowState?.first_contact_at && new Date().getTime() - new Date(selectedLead.createdAt || Date.now()).getTime() > 24 * 60 * 60 * 1000 && (
                                   <p className="text-[10px] font-black uppercase tracking-widest text-rose-600">Overdue: no first contact attempt within 24 hours</p>
@@ -2642,7 +2944,6 @@ const PatientLeads: React.FC = () => {
                              <div className="p-5 bg-indigo-50/70 border border-indigo-100 rounded-3xl space-y-3">
                                 <p className="text-[9px] font-black text-indigo-700 uppercase tracking-widest">Explain Patient Process</p>
                                 <p className="text-xs text-slate-600 leading-relaxed">Explain the clinical review, upload-time file checks, doctor matching, quotation, and consultation steps to the patient.</p>
-                                <button onClick={handleMarkProcessExplained} className="w-full p-3 bg-indigo-600 text-white rounded-xl font-black text-[10px] uppercase tracking-widest">Mark Process Explained</button>
                              </div>
                              <div className="p-5 bg-teal-50/70 border border-teal-100 rounded-3xl space-y-3">
                                 <div className="flex items-center justify-between"><p className="text-[9px] font-black text-teal-700 uppercase tracking-widest">Request Medical Documents</p><span className="text-[9px] font-black text-slate-500">{selectedLead.email || 'No email'}</span></div>
@@ -2697,14 +2998,31 @@ const PatientLeads: React.FC = () => {
                                 <p className="text-xs text-slate-500">Informational step: the doctor personally calls the patient to discuss the medical condition, history, concerns, expectations, and questions.</p>
                              </div>
                              <div className="p-5 bg-white border border-slate-100 rounded-3xl space-y-3">
-                                <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Record Doctor Call Notes</label>
+                                <div className="flex items-center justify-between">
+                                  <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Record Doctor Call Notes</label>
+                                  {localWorkflowState?.doctor_call_notes_saved_at && (
+                                    <span className="text-[9px] font-bold text-slate-400">Saved {new Date(localWorkflowState.doctor_call_notes_saved_at).toLocaleString()}</span>
+                                  )}
+                                </div>
                                 <textarea value={localWorkflowState?.doctor_call_notes || ''} onChange={(e) => handleUpdateSummary('doctor_call_notes', e.target.value)} placeholder="Record medical condition, history, concerns, expectations, and questions..." className="w-full p-3 bg-slate-50 border border-slate-100 rounded-xl text-xs min-h-[120px] outline-none" />
-                                <button onClick={handleSaveDoctorCallNotes} className="w-full p-3 bg-teal-600 text-white rounded-xl font-black text-[10px] uppercase tracking-widest">Save Doctor Call Notes</button>
+                                <button onClick={handleSaveDoctorCallNotes} className="w-full p-3 bg-teal-600 text-white rounded-xl font-black text-[10px] uppercase tracking-widest hover:bg-teal-700 transition-all">Save Doctor Call Notes</button>
                              </div>
-                             <div className="p-5 bg-indigo-50/70 border border-indigo-100 rounded-3xl space-y-3">
-                                <p className="text-[9px] font-black text-indigo-700 uppercase tracking-widest">Initial Doctor Assessment</p>
-                                <textarea value={localWorkflowState?.initial_doctor_assessment || ''} onChange={(e) => handleUpdateSummary('initial_doctor_assessment', e.target.value)} placeholder="Initial assessment and recommended next steps..." className="w-full p-3 bg-white border border-indigo-100 rounded-xl text-xs min-h-[100px] outline-none" />
-                                <textarea value={localWorkflowState?.doctor_next_steps || ''} onChange={(e) => handleUpdateSummary('doctor_next_steps', e.target.value)} placeholder="Recommended next steps..." className="w-full p-3 bg-white border border-indigo-100 rounded-xl text-xs min-h-[70px] outline-none" />
+                             <div className="p-5 bg-indigo-50/70 border border-indigo-100 rounded-3xl space-y-4">
+                                <div className="flex items-center justify-between">
+                                  <p className="text-[9px] font-black text-indigo-700 uppercase tracking-widest">Initial Doctor Assessment</p>
+                                  {localWorkflowState?.initial_doctor_assessment_saved_at && (
+                                    <span className="text-[9px] font-bold text-slate-400">Saved {new Date(localWorkflowState.initial_doctor_assessment_saved_at).toLocaleString()}</span>
+                                  )}
+                                </div>
+                                <div className="space-y-2">
+                                  <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest pl-1">Assessment</label>
+                                  <textarea value={localWorkflowState?.initial_doctor_assessment || ''} onChange={(e) => handleUpdateSummary('initial_doctor_assessment', e.target.value)} placeholder="Initial assessment of the patient's condition..." className="w-full p-3 bg-white border border-indigo-100 rounded-xl text-xs min-h-[110px] outline-none" />
+                                </div>
+                                <div className="space-y-2">
+                                  <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest pl-1">Recommended Next Steps</label>
+                                  <textarea value={localWorkflowState?.doctor_next_steps || ''} onChange={(e) => handleUpdateSummary('doctor_next_steps', e.target.value)} placeholder="Recommended next steps for the patient..." className="w-full p-3 bg-white border border-indigo-100 rounded-xl text-xs min-h-[90px] outline-none" />
+                                </div>
+                                <button onClick={handleSaveInitialAssessment} className="w-full p-3 bg-indigo-600 text-white rounded-xl font-black text-[10px] uppercase tracking-widest hover:bg-indigo-700 transition-all">Save Initial Assessment</button>
                              </div>
                              <button onClick={handleSendPersonalDoctorEmail} className="w-full p-3 bg-indigo-600 text-white rounded-xl font-black text-[10px] uppercase tracking-widest">{localWorkflowState?.personal_email_sent_at ? '✓ Personal Email Sent' : 'Send Personal Email to Patient'}</button>
                              <button onClick={handleCompleteDoctorInteraction} className={`w-full p-4 rounded-2xl font-black text-[10px] uppercase tracking-widest ${['Record Doctor Call Notes', 'Send Personal Email to Patient'].every(task => (localWorkflowState?.stage4_checklist || []).includes(task)) && localWorkflowState?.initial_doctor_assessment?.trim() ? 'bg-teal-600 text-white hover:bg-teal-700 shadow-lg' : 'bg-slate-200 text-slate-400 cursor-not-allowed'}`}>Complete In-House Doctor Interaction & Progress to Stage 5</button>
@@ -2718,7 +3036,7 @@ const PatientLeads: React.FC = () => {
                                    <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest pl-1">Selected Hospital</label>
                                    <select 
                                       className="w-full mt-1 p-2 bg-slate-50 border-none rounded-lg text-sm font-bold text-slate-700 outline-none focus:ring-2 focus:ring-teal-500/20"
-                                      value={localWorkflowState?.suggested_hospital || ""}
+                                      value={localWorkflowState?.suggested_hospital_id || hospitals.find(h => h.name === localWorkflowState?.suggested_hospital)?.id || ""}
                                       onChange={(e) => { const hospitalId = e.target.value; const hospital = hospitals.find(h => h.id === hospitalId); handleUpdateSummary('suggested_hospital', hospital?.name || ''); handleUpdateSummary('suggested_hospital_id', hospitalId); if (hospitalId && localWorkflowState?.suggested_surgeon) saveStage5Task('Suggest Hospitals & Surgeons/Specialists', { suggested_hospital: hospital?.name || '', suggested_hospital_id: hospitalId }); }}
                                     >
                                       <option value="">Select Hospital...</option>
@@ -2729,7 +3047,7 @@ const PatientLeads: React.FC = () => {
                                    <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest pl-1">Assigned Surgeon</label>
                                    <select 
                                       className="w-full mt-1 p-2 bg-slate-50 border-none rounded-lg text-sm font-bold text-slate-700 outline-none focus:ring-2 focus:ring-teal-500/20"
-                                      value={localWorkflowState?.suggested_surgeon_id || ""}
+                                      value={localWorkflowState?.suggested_surgeon_id || doctors.find(d => d.name === localWorkflowState?.suggested_surgeon)?.id || ""}
                                       onChange={(e) => { const surgeonId = e.target.value; const surgeon = doctors.find(d => d.id === surgeonId); handleUpdateSummary('suggested_surgeon', surgeon?.name || ''); handleUpdateSummary('suggested_surgeon_id', surgeonId); if (surgeonId && localWorkflowState?.suggested_hospital) saveStage5Task('Suggest Hospitals & Surgeons/Specialists', { suggested_surgeon: surgeon?.name || '', suggested_surgeon_id: surgeonId }); }}
                                     >
                                       <option value="">Select Surgeon...</option>
@@ -2830,129 +3148,9 @@ const PatientLeads: React.FC = () => {
 
                        {activeWorkflowStage === 6 && (
                           <div className="space-y-4">
-                            <div className="flex items-center justify-between pl-1">
-                              <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Financial Quotation Builder</label>
-                              <button 
-                                onClick={addQuotationItem}
-                                className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 text-indigo-600 rounded-lg text-[9px] font-black uppercase tracking-widest hover:bg-indigo-600 hover:text-white transition-all shadow-sm"
-                              >
-                                <Plus size={12} /> Add Line Item
-                              </button>
-                            </div>
+                            <LeadQuotationPanel lead={selectedLead} />
 
-                            <div className="space-y-3">
-                              {(localWorkflowState?.quotation_items || []).map((item: any) => (
-                                <div key={item.id} className="flex gap-2 items-center animate-in slide-in-from-right-4 duration-300">
-                                  <input 
-                                    type="text"
-                                    placeholder="Description"
-                                    className="flex-[3] p-3 bg-white border border-slate-100 rounded-xl text-[11px] font-bold outline-none focus:ring-2 focus:ring-indigo-500/10 transition-all"
-                                    value={item.description}
-                                    onChange={(e) => updateQuotationItem(item.id, 'description', e.target.value)}
-                                  />
-                                  <div className="relative w-16">
-                                    <input 
-                                      type="number"
-                                      placeholder="Qty"
-                                      className="w-full p-3 bg-white border border-slate-100 rounded-xl text-[11px] font-black text-center outline-none focus:ring-2 focus:ring-indigo-500/10 transition-all"
-                                      value={item.qty || 1}
-                                      onChange={(e) => updateQuotationItem(item.id, 'qty', parseInt(e.target.value) || 1)}
-                                    />
-                                  </div>
-                                  <div className="relative w-24">
-                                    <span className="absolute left-2 top-1/2 -translate-y-1/2 text-[9px] font-black text-slate-400">$</span>
-                                    <input 
-                                      type="number"
-                                      placeholder="Rate"
-                                      className="w-full pl-5 pr-2 py-3 bg-white border border-slate-100 rounded-xl text-[11px] font-black outline-none focus:ring-2 focus:ring-indigo-500/10 transition-all"
-                                      value={item.rate || 0}
-                                      onChange={(e) => updateQuotationItem(item.id, 'rate', parseFloat(e.target.value) || 0)}
-                                    />
-                                  </div>
-                                  <button 
-                                    onClick={() => removeQuotationItem(item.id)}
-                                    className="p-2 text-slate-300 hover:text-rose-500 transition-colors"
-                                  >
-                                    <X size={16} />
-                                  </button>
-                                </div>
-                              ))}
-
-                              {(!localWorkflowState?.quotation_items || localWorkflowState.quotation_items.length === 0) && (
-                                <div className="p-8 border-2 border-dashed border-slate-100 rounded-[2rem] text-center opacity-40">
-                                  <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">No quotation items added yet</p>
-                                </div>
-                              )}
-
-                              {localWorkflowState?.quotation_items?.length > 0 && (
-                                <div className="flex items-center justify-between p-4 bg-slate-900 rounded-2xl text-white shadow-xl shadow-slate-900/10">
-                                  <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Grand Total</span>
-                                  <span className="text-lg font-black tracking-tight">
-                                    ${(localWorkflowState.quotation_items.reduce((acc: number, item: any) => acc + ((item.qty || 1) * (item.rate || 0)), 0)).toLocaleString()}
-                                  </span>
-                                </div>
-                              )}
-                            </div>
-
-                            <div className="grid grid-cols-1 gap-4">
-                               <div>
-                                  <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest pl-1">Travel, Logistics & Additional Terms</label>
-                                  <textarea 
-                                     className="w-full mt-2 p-4 bg-white border border-slate-100 rounded-2xl text-xs font-medium h-24 outline-none focus:ring-2 focus:ring-indigo-500/10 transition-all"
-                                     placeholder="Enter logistics details, flight info, or payment terms..."
-                                     value={localWorkflowState?.travel_accommodation || ''}
-                                     onChange={(e) => { handleUpdateSummary('travel_accommodation', e.target.value); if (e.target.value.trim()) saveStage6Task('Discuss Travel & Accommodation', { travel_accommodation: e.target.value }); }}
-                                  />
-                               </div>
-                               <div>
-                                  <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest pl-1">Address Patient Concerns</label>
-                                  <textarea
-                                     className="w-full mt-2 p-4 bg-white border border-slate-100 rounded-2xl text-xs font-medium h-24 outline-none focus:ring-2 focus:ring-indigo-500/10 transition-all"
-                                     placeholder="Record concerns about price, treatment, hospital, surgeon, travel, accommodation, or other matters..."
-                                     value={localWorkflowState?.patient_concerns || ''}
-                                     onChange={(e) => { handleUpdateSummary('patient_concerns', e.target.value); if (e.target.value.trim()) saveStage6Task('Address Patient Concerns', { patient_concerns: e.target.value }); }}
-                                  />
-                               </div>
-                            </div>
-
-                               <div className="flex flex-col gap-3">
-                                 <div className="flex gap-2">
-                                   <button 
-                                     onClick={generateFinancialProposalPDF}
-                                     className={`flex-1 p-4 rounded-2xl font-black text-[10px] uppercase tracking-widest flex items-center justify-center gap-2 shadow-lg transition-all border-2 ${
-                                       localWorkflowState?.financial_proposal_pdf 
-                                       ? 'bg-slate-50 border-slate-200 text-slate-400' 
-                                       : 'bg-indigo-600 border-indigo-600 text-white hover:bg-indigo-700'
-                                     }`}
-                                   >
-                                      <FileText size={16} /> {localWorkflowState?.financial_proposal_pdf ? 'Regenerate Proposal' : 'Generate Proposal PDF'}
-                                   </button>
-                                   {localWorkflowState?.financial_proposal_pdf && (
-                                     <button 
-                                       onClick={() => {
-                                         const blobUrl = URL.createObjectURL(
-                                           new Blob([Uint8Array.from(atob(localWorkflowState.financial_proposal_pdf), c => c.charCodeAt(0))], { type: 'application/pdf' })
-                                         );
-                                         window.open(blobUrl, '_blank');
-                                       }}
-                                       className="p-4 bg-slate-100 text-slate-600 rounded-2xl font-black text-[10px] uppercase tracking-widest flex items-center justify-center gap-2 hover:bg-slate-200 transition-all shadow-sm"
-                                     >
-                                        <ExternalLink size={16} /> View
-                                     </button>
-                                   )}
-                                 </div>
-                                 
-                                 {localWorkflowState?.financial_proposal_pdf && (
-                                   <button 
-                                     onClick={sendProposalToPatient}
-                                     className="w-full p-4 bg-teal-600 text-white rounded-2xl font-black text-[10px] uppercase tracking-widest flex items-center justify-center gap-2 hover:bg-teal-700 transition-all shadow-lg"
-                                   >
-                                      <Mail size={16} /> Email Proposal to Patient
-                                   </button>
-                                 )}
-                               </div>
-
-                               <div className="p-6 bg-slate-50 rounded-[2rem] border border-slate-100">
+                            <div className="p-6 bg-slate-50 rounded-[2rem] border border-slate-100">
                                   <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-4 text-center">Patient Decision</p>
                                   <p className="text-xs text-slate-600 font-bold text-center mb-6 px-4">
                                     Are you interested to proceed with the following procedures suggested by the doctor?
@@ -3015,17 +3213,35 @@ const PatientLeads: React.FC = () => {
                              </div>
                              <div className="p-5 bg-white border border-slate-100 rounded-3xl space-y-3">
                                 <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Step 1 — Specialist Doctor Call</p>
+                                {localWorkflowState?.doctor_call_notes && (
+                                  <div className="p-4 bg-slate-50 border border-slate-100 rounded-xl">
+                                    <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-2">Saved Doctor Call Notes (Stage 4)</p>
+                                    <p className="text-xs text-slate-700 whitespace-pre-wrap">{localWorkflowState.doctor_call_notes}</p>
+                                  </div>
+                                )}
                                 <textarea value={localWorkflowState?.specialist_call_notes || ''} onChange={(e) => handleUpdateSummary('specialist_call_notes', e.target.value)} placeholder="Medical condition, proposed treatment, procedure, clinical process, questions, and concerns..." className="w-full p-3 bg-slate-50 border border-slate-100 rounded-xl text-xs min-h-[110px] outline-none" />
                                 <button onClick={() => handleCompleteSpecialistCall(localWorkflowState?.specialist_call_notes || '')} className="w-full p-3 bg-indigo-600 text-white rounded-xl font-black text-[10px] uppercase tracking-widest">{localWorkflowState?.specialist_call_completed_at ? '✓ Specialist Doctor Call Recorded' : 'Record Specialist Doctor Call'}</button>
+                                {localWorkflowState?.specialist_call_completed_at && localWorkflowState?.specialist_call_notes && (
+                                  <div className="p-4 bg-indigo-50/60 border border-indigo-100 rounded-xl">
+                                    <p className="text-[9px] font-black text-indigo-700 uppercase tracking-widest mb-2">Saved Specialist Call Notes · {new Date(localWorkflowState.specialist_call_completed_at).toLocaleString()}</p>
+                                    <p className="text-xs text-slate-700 whitespace-pre-wrap">{localWorkflowState.specialist_call_notes}</p>
+                                  </div>
+                                )}
                              </div>
                              <div className="p-5 bg-white border border-slate-100 rounded-3xl space-y-3">
                                 <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Step 2 — Record MOM</p>
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                                  {[
-                                    ['mom_date_time', 'Date / time'], ['mom_participants', 'Participants'], ['mom_discussion_points', 'Main discussion points'], ['mom_specialist_observations', 'Specialist observations'], ['mom_patient_questions', 'Patient questions'], ['mom_decisions', 'Decisions'], ['mom_next_steps', 'Next steps'], ['mom_instructions', 'Important instructions'],
-                                  ].map(([field, label]) => <textarea key={field} value={localWorkflowState?.[field] || ''} onChange={(e) => handleUpdateSummary(field, e.target.value)} placeholder={label} className="w-full p-3 bg-slate-50 border border-slate-100 rounded-xl text-xs min-h-[58px] outline-none" />)}
+                                  {MOM_FIELDS.map(([field, label]) => (
+                                    <div key={field} className="space-y-1">
+                                      <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest pl-1">{label}</label>
+                                      <textarea value={localWorkflowState?.[field] || ''} onChange={(e) => handleUpdateSummary(field, e.target.value)} placeholder={label} className="w-full p-3 bg-slate-50 border border-slate-100 rounded-xl text-xs min-h-[58px] outline-none" />
+                                    </div>
+                                  ))}
                                 </div>
                                 <button onClick={handleRecordMOM} className="w-full p-3 bg-teal-600 text-white rounded-xl font-black text-[10px] uppercase tracking-widest">{localWorkflowState?.mom_recorded_at ? '✓ MOM Recorded' : 'Record MOM'}</button>
+                                {localWorkflowState?.mom_pdf_url && (
+                                  <a href={localWorkflowState.mom_pdf_url} target="_blank" rel="noreferrer" className="block w-full p-3 text-center bg-slate-100 text-slate-700 rounded-xl font-black text-[10px] uppercase tracking-widest hover:bg-slate-200">View MOM PDF</a>
+                                )}
                              </div>
                              <div className="p-5 bg-white border border-slate-100 rounded-3xl space-y-3">
                                 <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Step 3 — BDM Calls Patient</p>
@@ -3095,7 +3311,13 @@ const PatientLeads: React.FC = () => {
                                 <button onClick={handleAcceptHandover} className={`w-full p-3 rounded-xl font-black text-[10px] uppercase tracking-widest ${localWorkflowState?.handover_accepted_at ? 'bg-emerald-600 text-white' : 'bg-white text-emerald-700 border border-emerald-100'}`}>{localWorkflowState?.handover_accepted_at ? '✓ CDM/WaruBuddy Accepted Handover' : 'CDM/WaruBuddy Accepts Handover'}</button>
                                 <button onClick={handleConfirmCaseOwnership} className={`w-full p-3 rounded-xl font-black text-[10px] uppercase tracking-widest ${localWorkflowState?.case_ownership_confirmed_at ? 'bg-emerald-600 text-white' : 'bg-white text-emerald-700 border border-emerald-100'}`}>{localWorkflowState?.case_ownership_confirmed_at ? '✓ Case Ownership Confirmed' : 'Confirm Case Ownership'}</button>
                              </div>
-                             <button onClick={handleCompleteStage8} className={`w-full p-5 rounded-3xl font-black text-xs uppercase tracking-widest flex items-center justify-center gap-3 ${validateStagePrerequisites(8, 'Complete Stage 8') ? 'bg-teal-600 text-white' : 'bg-slate-200 text-slate-400 cursor-not-allowed'}`}><CheckCircle2 size={18} /> {validateStagePrerequisites(8, 'Complete Stage 8') ? 'Complete Stage 8' : 'Complete All Stage 8 Requirements'}</button>
+                             <button onClick={handleCompleteStage8} disabled={Boolean(localWorkflowState?.stage8_completed_at)} className={`w-full p-5 rounded-3xl font-black text-xs uppercase tracking-widest flex items-center justify-center gap-3 ${localWorkflowState?.stage8_completed_at ? 'bg-emerald-600 text-white' : validateStagePrerequisites(8, 'Complete Stage 8') ? 'bg-teal-600 text-white' : 'bg-slate-200 text-slate-400 cursor-not-allowed'}`}><CheckCircle2 size={18} /> {localWorkflowState?.stage8_completed_at ? 'Stage 8 Completed' : validateStagePrerequisites(8, 'Complete Stage 8') ? 'Complete Stage 8' : 'Complete All Stage 8 Requirements'}</button>
+                             {localWorkflowState?.stage8_completed_at && (
+                               <div className="w-full p-5 rounded-3xl bg-emerald-50 border border-emerald-200 text-center">
+                                 <p className="text-[11px] font-black text-emerald-700 uppercase tracking-widest">Lead Won</p>
+                                 <p className="text-xs text-emerald-800 mt-2">This lead is won. Completed on {new Date(localWorkflowState.stage8_completed_at).toLocaleString()}.</p>
+                               </div>
+                             )}
                           </div>
                        )}
 

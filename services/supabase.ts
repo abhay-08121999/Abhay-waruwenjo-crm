@@ -1607,6 +1607,32 @@ export const getAgreementPdfUrl = async (filePath: string) => {
   return { data: data?.signedUrl ?? null, error };
 };
 
+/** Upload a generated Clinical Review Report PDF to the public `clinical-reports` Storage bucket.
+ * Stored at clinical-reports/<lead_id>/clinical-review-<timestamp>.pdf (every regeneration is kept).
+ */
+export const uploadClinicalReportPdf = async (leadId: string, pdfBlob: Blob) => {
+  const normalizedLeadId = String(leadId ?? '').trim();
+  if (!normalizedLeadId) {
+    return { data: null, error: new Error('Lead ID is required to store the clinical report.'), filePath: null as string | null, fileName: null as string | null };
+  }
+  const fileName = `clinical-review-${new Date().toISOString().replace(/[:.]/g, '-')}.pdf`;
+  const filePath = `${normalizedLeadId}/${fileName}`;
+  const { data, error } = await supabase.storage
+    .from('clinical-reports')
+    .upload(filePath, pdfBlob, { contentType: 'application/pdf', upsert: false, cacheControl: '3600' });
+  if (error) {
+    console.error('Clinical report upload failed:', error);
+    return { data: null, error, filePath: null as string | null, fileName: null as string | null };
+  }
+  return { data, error: null, filePath, fileName };
+};
+
+/** Public URL of a clinical report PDF in the public `clinical-reports` bucket. */
+export const getClinicalReportUrl = async (filePath: string) => {
+  const { data } = supabase.storage.from('clinical-reports').getPublicUrl(filePath);
+  return { data: data?.publicUrl ?? null, error: null };
+};
+
 /**
  * Upload the final, signed MOU PDF to the private `signedmou` bucket.
  * Draft/generated agreement PDFs continue to use the separate `agreements` bucket.

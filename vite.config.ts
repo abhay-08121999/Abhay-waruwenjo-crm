@@ -19,7 +19,7 @@ export default defineConfig(({ mode }) => {
           req.on('end', async () => {
             try {
               const data = JSON.parse(body);
-              const { lead: rawLead, pdf_base64, to_email, to_name, custom_subject, custom_html } = data;
+              const { lead: rawLead, pdf_base64, pdf_filename, to_email, to_name, custom_subject, custom_html } = data;
               const lead = rawLead || {};
 
               const transporter = nodemailer.createTransport({
@@ -35,7 +35,7 @@ export default defineConfig(({ mode }) => {
               });
 
               // Construct email HTML
-              const refId = (lead.id || "").slice(0, 8).toUpperCase() || "PENDING";
+              const refId = lead.lead_code || ((lead.id || "").slice(0, 8).toUpperCase() || "PENDING");
               const dateLabel = lead.preferred_date ? new Date(lead.preferred_date).toLocaleDateString() : "Flexible";
 
               const defaultHtmlBody = `<!DOCTYPE html>
@@ -144,7 +144,7 @@ export default defineConfig(({ mode }) => {
                 subject: custom_subject || `✅ Enquiry Received — Welcome to WaruWenJo! (Ref: ${refId})`,
                 html: custom_html || defaultHtmlBody,
                 attachments: pdf_base64 ? [{
-                  filename: 'WaruWenJo_Enquiry_Summary.pdf',
+                  filename: pdf_filename || 'WaruWenJo_Enquiry_Summary.pdf',
                   content: pdf_base64,
                   encoding: 'base64'
                 }] : []
@@ -386,7 +386,7 @@ export default defineConfig(({ mode }) => {
               const mailOptions = {
                 from: '"WaruWenJo CRM" <support@waruwenjo.com>',
                 to: doctorEmail,
-                subject: `📋 Clinical Review Requested: ${lead.full_name} (${lead.id.slice(0,8)})`,
+                subject: `📋 Clinical Review Requested: ${lead.full_name} (${lead.lead_code || lead.id.slice(0,8)})`,
                 html: htmlBody,
                 attachments: pdf_base64 ? [{
                   filename: `Medical_Reports_${lead.full_name.replace(/\s+/g, '_')}.pdf`,

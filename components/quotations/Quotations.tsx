@@ -1,16 +1,26 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import QuotationsList from './QuotationsList';
 import QuotationBuilder from './QuotationBuilder';
 import TemplateManager from './TemplateManager';
 import { FileText, FileSignature, LayoutTemplate } from 'lucide-react';
 
 const Quotations = () => {
-  const [activeTab, setActiveTab] = useState<'list' | 'builder' | 'templates'>('list');
-  const [selectedQuotationId, setSelectedQuotationId] = useState<string | null>(null);
+  // Set by PatientLeads when it sends the user here: a patient to pre-select, or an existing quotation to open.
+  const [prefillLeadId, setPrefillLeadId] = useState<string | null>(() => sessionStorage.getItem('quotation_prefill_lead_id'));
+  const [selectedQuotationId, setSelectedQuotationId] = useState<string | null>(() => sessionStorage.getItem('quotation_open_id'));
+  const [activeTab, setActiveTab] = useState<'list' | 'builder' | 'templates'>(() =>
+    (sessionStorage.getItem('quotation_prefill_lead_id') || sessionStorage.getItem('quotation_open_id')) ? 'builder' : 'list'
+  );
   const [initialPreview, setInitialPreview] = useState(false);
+
+  useEffect(() => {
+    sessionStorage.removeItem('quotation_prefill_lead_id');
+    sessionStorage.removeItem('quotation_open_id');
+  }, []);
 
   const handleCreateNew = () => {
     setSelectedQuotationId(null);
+    setPrefillLeadId(null);
     setInitialPreview(false);
     setActiveTab('builder');
   };
@@ -79,7 +89,8 @@ const Quotations = () => {
         {activeTab === 'builder' && (
           <QuotationBuilder 
             quotationId={selectedQuotationId} 
-            onBack={() => { setActiveTab('list'); setInitialPreview(false); }}
+            initialLeadId={selectedQuotationId ? null : prefillLeadId}
+            onBack={() => { setActiveTab('list'); setInitialPreview(false); setPrefillLeadId(null); }}
             initialPreview={initialPreview}
           />
         )}
@@ -90,4 +101,3 @@ const Quotations = () => {
 };
 
 export default Quotations;
-
