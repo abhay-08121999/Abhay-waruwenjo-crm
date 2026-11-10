@@ -49,6 +49,281 @@ const emptyPermissions = () =>
     DEFAULT_ROLE_PERMISSIONS.map((permission) => [permission.key, false]),
   );
 
+const STAGE_FUNCTIONS: {
+  key: string;
+  label: string;
+  readFlat: string;
+  writeFlat: string;
+  stages: string[];
+}[] = [
+  {
+    key: 'patient_leads',
+    label: 'Patient Leads',
+    readFlat: 'leads.read',
+    writeFlat: 'leads.write',
+    stages: [
+      'New Lead',
+      'Contact Attempted',
+      'Medical Documents',
+      'In-House Doctor Interaction',
+      'Clinical Qualification & Planning',
+      'Financial & Logistics Proposal',
+      'Specialist Consultation, Payment & Confirmation',
+      'Medical Case Handover',
+      'Lost / Dropped',
+    ],
+  },
+  {
+    key: 'medical_leads',
+    label: 'Medical Leads',
+    readFlat: 'leads.read',
+    writeFlat: 'leads.write',
+    stages: [
+      'Partnership Inquiry',
+      'Qualified Partner',
+      'Contracting / Proposal',
+      'Active Partners',
+      'Archived / Deleted Partners',
+    ],
+  },
+];
+
+const DIRECT_FUNCTIONS: { label: string; read: string; write?: string }[] = [
+  { label: 'Dashboard & CRM', read: 'crm.read', write: 'crm.write' },
+  { label: 'Sales Pipeline', read: 'leads.read', write: 'leads.write' },
+  { label: 'Hospitals & Doctors (Clinical)', read: 'clinical.read', write: 'clinical.write' },
+  { label: 'Consent Center & Vault', read: 'documents.read', write: 'documents.write' },
+  { label: 'Communications & WhatsApp', read: 'communications.read', write: 'communications.write' },
+  { label: 'Patients & Cases', read: 'cases.read', write: 'cases.write' },
+  { label: 'Quotations, Agreements & Finance', read: 'finance.read', write: 'finance.write' },
+  { label: 'Travel & Logistics', read: 'travel.read', write: 'travel.write' },
+  { label: 'Analytics', read: 'analytics.read' },
+  { label: 'Settings', read: 'settings.read' },
+];
+
+const stageKey = (functionKey: string, index: number, action: 'read' | 'write') =>
+  `${functionKey}.stage_${index + 1}.${action}`;
+
+// Saved role permissions: every stage key that is ticked, every direct key that is ticked,
+// plus the module keys the rest of the CRM checks (e.g. leads.read opens Patient Leads).
+const buildRolePermissions = (raw: Record<string, boolean>) => {
+  const result: Record<string, boolean> = {};
+
+  Object.entries(raw).forEach(([key, enabled]) => {
+    if (enabled && key !== 'users.manage') {
+      result[key] = true;
+    }
+  });
+
+  STAGE_FUNCTIONS.forEach((fn) => {
+    const anyRead = fn.stages.some(
+      (_, i) => raw[stageKey(fn.key, i, 'read')] || raw[stageKey(fn.key, i, 'write')],
+    );
+    const anyWrite = fn.stages.some((_, i) => raw[stageKey(fn.key, i, 'write')]);
+
+    if (anyRead) result[fn.readFlat] = true;
+    if (anyWrite) {
+      result[fn.writeFlat] = true;
+      result[fn.readFlat] = true;
+    }
+  });
+
+  return result;
+};
+
+const FunctionAccessPicker = ({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: Record<string, boolean>;
+  onChange: (next: Record<string, boolean>) => void;
+  disabled: boolean;
+}) => {
+  const [openFunctions, setOpenFunctions] = useState<Record<string, boolean>>({});
+
+  const toggleOpen = (key: string) =>
+    setOpenFunctions((current) => ({ ...current, [key]: !current[key] }));
+
+  // Write access always includes read access; removing read also removes write.
+  const setRead = (readKey: string, writeKey: string | undefined, checked: boolean) =>
+    onChange({
+      ...value,
+      [readKey]: checked,
+      ...(!checked && writeKey ? { [writeKey]: false } : {}),
+    });
+
+  const setWrite = (readKey: string, writeKey: string, checked: boolean) =>
+    onChange({
+      ...value,
+      [writeKey]: checked,
+      ...(checked ? { [readKey]: true } : {}),
+    });
+
+  const setFull = (units: { read: string; write?: string }[], checked: boolean) => {
+    const updates: Record<string, boolean> = {};
+    units.forEach((unit) => {
+      updates[unit.read] = checked;
+      if (unit.write) updates[unit.write] = checked;
+    });
+    onChange({ ...value, ...updates });
+  };
+
+  const isFull = (units: { read: string; write?: string }[]) =>
+    units.length > 0 &&
+    units.every((unit) => Boolean(value[unit.read]) && (!unit.write || Boolean(value[unit.write])));
+
+  const countReadable = (units: { read: string; write?: string }[]) =>
+    units.filter((unit) => value[unit.read]).length;
+
+  const checkbox =
+    'h-4 w-4 cursor-pointer rounded border-slate-300 accent-teal-600 disabled:cursor-not-allowed disabled:opacity-50';
+
+  const DIRECT_GRID = 'grid grid-cols-[minmax(0,1fr)_64px_64px_64px] items-center gap-x-3';
+  const STAGE_GRID = 'grid grid-cols-[minmax(0,1fr)_64px_64px] items-center gap-x-3';
+
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white shadow-sm">
+      {/* Column headings for the function list */}
+      <div className={`${DIRECT_GRID} px-4 py-2.5 border-b border-slate-200 bg-slate-50 rounded-t-xl`}>
+        <span className="text-[10px] font-black uppercase tracking-widest text-slate-500">Function</span>
+        <span className="text-center text-[10px] font-black uppercase tracking-widest text-slate-500">Read</span>
+        <span className="text-center text-[10px] font-black uppercase tracking-widest text-slate-500">Write</span>
+        <span className="text-center text-[10px] font-black uppercase tracking-widest text-slate-500">Full</span>
+      </div>
+
+      <div className="max-h-[30rem] overflow-y-auto">
+        {/* Stage-based functions: click to open the stage list */}
+        {STAGE_FUNCTIONS.map((fn) => {
+          const units = fn.stages.map((_, i) => ({
+            read: stageKey(fn.key, i, 'read'),
+            write: stageKey(fn.key, i, 'write'),
+          }));
+          const isOpen = Boolean(openFunctions[fn.key]);
+          const fullOn = isFull(units);
+          const readCount = countReadable(units);
+
+          return (
+            <div key={fn.key} className="border-b border-slate-100 last:border-b-0">
+              <div className={`${DIRECT_GRID} px-4 py-3 hover:bg-slate-50`}>
+                <button
+                  type="button"
+                  onClick={() => toggleOpen(fn.key)}
+                  className="flex items-center gap-2 text-left"
+                >
+                  <ChevronDown
+                    className={`h-4 w-4 text-slate-500 transition-transform ${isOpen ? 'rotate-180' : ''}`}
+                  />
+                  <span className="text-sm font-bold text-slate-800">{fn.label}</span>
+                  <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-bold text-slate-500">
+                    {readCount}/{fn.stages.length} stages
+                  </span>
+                </button>
+                <span />
+                <span />
+                <span className="flex justify-center">
+                  <input
+                    type="checkbox"
+                    className={checkbox}
+                    checked={fullOn}
+                    disabled={disabled}
+                    onChange={(e) => setFull(units, e.target.checked)}
+                    aria-label={`Full access to ${fn.label}`}
+                  />
+                </span>
+              </div>
+
+              {isOpen && (
+                <div className="bg-slate-50/60 px-4 pb-3">
+                  <div className={`${STAGE_GRID} py-2 border-b border-slate-200`}>
+                    <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Stage</span>
+                    <span className="text-center text-[10px] font-black uppercase tracking-widest text-slate-400">Read</span>
+                    <span className="text-center text-[10px] font-black uppercase tracking-widest text-slate-400">Write</span>
+                  </div>
+                  {fn.stages.map((stage, i) => {
+                    const unit = units[i];
+                    return (
+                      <div key={unit.read} className={`${STAGE_GRID} py-2 border-b border-slate-100 last:border-b-0`}>
+                        <span className="text-xs text-slate-700">
+                          {i + 1}. {stage}
+                        </span>
+                        <span className="flex justify-center">
+                          <input
+                            type="checkbox"
+                            className={checkbox}
+                            checked={Boolean(value[unit.read])}
+                            disabled={disabled}
+                            onChange={(e) => setRead(unit.read, unit.write, e.target.checked)}
+                            aria-label={`Read ${stage}`}
+                          />
+                        </span>
+                        <span className="flex justify-center">
+                          <input
+                            type="checkbox"
+                            className={checkbox}
+                            checked={Boolean(value[unit.write])}
+                            disabled={disabled}
+                            onChange={(e) => setWrite(unit.read, unit.write, e.target.checked)}
+                            aria-label={`Write ${stage}`}
+                          />
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        })}
+
+        {/* Direct functions: one row each with read, write and full access */}
+        {DIRECT_FUNCTIONS.map((fn) => {
+          const units = [{ read: fn.read, write: fn.write }];
+          return (
+            <div key={fn.label} className={`${DIRECT_GRID} border-b border-slate-100 px-4 py-3 last:border-b-0 hover:bg-slate-50`}>
+              <span className="text-sm font-semibold text-slate-800">{fn.label}</span>
+              <span className="flex justify-center">
+                <input
+                  type="checkbox"
+                  className={checkbox}
+                  checked={Boolean(value[fn.read])}
+                  disabled={disabled}
+                  onChange={(e) => setRead(fn.read, fn.write, e.target.checked)}
+                  aria-label={`Read ${fn.label}`}
+                />
+              </span>
+              <span className="flex justify-center">
+                {fn.write ? (
+                  <input
+                    type="checkbox"
+                    className={checkbox}
+                    checked={Boolean(value[fn.write])}
+                    disabled={disabled}
+                    onChange={(e) => setWrite(fn.read, fn.write as string, e.target.checked)}
+                    aria-label={`Write ${fn.label}`}
+                  />
+                ) : (
+                  <span className="text-xs text-slate-300">—</span>
+                )}
+              </span>
+              <span className="flex justify-center">
+                <input
+                  type="checkbox"
+                  className={checkbox}
+                  checked={isFull(units)}
+                  disabled={disabled}
+                  onChange={(e) => setFull(units, e.target.checked)}
+                  aria-label={`Full access to ${fn.label}`}
+                />
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+};
+
 const CrmUserManagement = () => {
   const [users, setUsers] = useState<CrmUser[]>([]);
   const [roles, setRoles] = useState<CrmRole[]>([]);
@@ -134,16 +409,7 @@ const CrmUserManagement = () => {
       return;
     }
 
-    const permissions: Record<string, boolean> = {};
-
-    Object.entries(newRolePermissions).forEach(([key, enabled]) => {
-      if (enabled) {
-        permissions[key] = true;
-      }
-    });
-
-    /* users.manage is intentionally excluded from custom roles. */
-    delete permissions['users.manage'];
+    const permissions = buildRolePermissions(newRolePermissions);
 
     setSaving('create-role');
 
@@ -217,13 +483,7 @@ const CrmUserManagement = () => {
       return;
     }
 
-    const permissions: Record<string, boolean> = {};
-
-    Object.entries(editRolePermissions).forEach(([key, enabled]) => {
-      if (enabled && key !== 'users.manage') {
-        permissions[key] = true;
-      }
-    });
+    const permissions = buildRolePermissions(editRolePermissions);
 
     setSaving(`edit-role-${editingRole.id}`);
 
@@ -810,53 +1070,7 @@ const CrmUserManagement = () => {
                     </span>
                   </div>
 
-                  <div className="grid md:grid-cols-2 gap-1 max-h-44 overflow-y-auto pr-1">
-                    {DEFAULT_ROLE_PERMISSIONS.map((permission) => {
-                      const disabled = permission.key === 'users.manage';
-
-                      return (
-                        <label
-                          key={permission.key}
-                          className={`flex items-start gap-2 rounded-md border p-1.5 ${
-                            disabled
-                              ? 'cursor-not-allowed bg-slate-50 opacity-60'
-                              : 'cursor-pointer hover:bg-slate-50'
-                          }`}
-                        >
-                          <input
-                            type="checkbox"
-                            checked={
-                              disabled
-                                ? false
-                                : Boolean(editRolePermissions[permission.key])
-                            }
-                            onChange={(e) =>
-                              togglePermission(
-                                setEditRolePermissions,
-                                permission.key,
-                                e.target.checked,
-                              )
-                            }
-                            className="mt-1"
-                            disabled={
-                              saving === `edit-role-${editingRole.id}` ||
-                              disabled
-                            }
-                          />
-
-                          <span>
-                            <span className="block text-sm font-semibold text-slate-800">
-                              {permission.label}
-                            </span>
-
-                            <span className="block text-xs text-slate-500">
-                              {permission.description}
-                            </span>
-                          </span>
-                        </label>
-                      );
-                    })}
-                  </div>
+                  <FunctionAccessPicker value={editRolePermissions} onChange={setEditRolePermissions} disabled={saving === `edit-role-${editingRole.id}`} />
                 </div>
 
                 <div className="flex justify-end gap-2">
@@ -924,50 +1138,7 @@ const CrmUserManagement = () => {
                   </span>
                 </div>
 
-                <div className="grid md:grid-cols-2 gap-2 max-h-80 overflow-y-auto pr-1">
-                  {DEFAULT_ROLE_PERMISSIONS.map((permission) => {
-                    const disabled = permission.key === 'users.manage';
-
-                    return (
-                      <label
-                        key={permission.key}
-                        className={`flex items-start gap-3 rounded-lg border p-3 ${
-                          disabled
-                            ? 'cursor-not-allowed bg-slate-50 opacity-60'
-                            : 'cursor-pointer hover:bg-slate-50'
-                        }`}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={
-                            disabled
-                              ? false
-                              : Boolean(newRolePermissions[permission.key])
-                          }
-                          onChange={(e) =>
-                            togglePermission(
-                              setNewRolePermissions,
-                              permission.key,
-                              e.target.checked,
-                            )
-                          }
-                          className="mt-1"
-                          disabled={saving === 'create-role' || disabled}
-                        />
-
-                        <span>
-                          <span className="block text-sm font-semibold text-slate-800">
-                            {permission.label}
-                          </span>
-
-                          <span className="block text-xs text-slate-500">
-                            {permission.description}
-                          </span>
-                        </span>
-                      </label>
-                    );
-                  })}
-                </div>
+                <FunctionAccessPicker value={newRolePermissions} onChange={setNewRolePermissions} disabled={saving === 'create-role'} />
               </div>
 
               <Button
