@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { getLeadCode } from '../lib/leadCode.ts';
 import { fetchLeads, createLead, updateLeadStatus, updatePatientEnquiry, convertProfileToCase, createConsultationFromEnquiry, fetchActiveDoctors, fetchDoctors, fetchHospitals, updateLeadWorkflow, saveLeadWorkflowState, logAdminActivity, fetchAdminActivityLogs, sendCrmEmail, fetchEnquiryDocuments, createPatientAccountFromEnquiry, uploadEnquiryDocument } from '../services/supabase.ts';
 import { supabase } from '../integrations/supabase/client';
-import { fetchInHouseDoctorUsers, InHouseDoctorUser, CrmRole } from '../services/roles';
+import { fetchInHouseDoctorUsers, InHouseDoctorUser, CrmRole, getCustomStageAccess } from '../services/roles';
 import { LeadStatus, Lead, Doctor, Hospital } from '../types.ts';
 import { 
   Search, Filter, MoreVertical, Mail, Phone, Plus, X, Activity, UserPlus, 
@@ -66,10 +66,26 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
         String(role.key || '').toLowerCase().replace(/[^a-z]/g, '') === 'inhousedoctor' ||
         String(role.name || '').toLowerCase().replace(/[^a-z]/g, '') === 'inhousedoctor'
     );
+  // Custom roles only see and edit the stages ticked for them (Read / Write) in User & Role Management.
+  const customStageAccess = getCustomStageAccess(roles, 'patient_leads');
   const canAccessStage = (stageId: number) =>
-    !isInHouseDoctorOnly || IN_HOUSE_DOCTOR_STAGES.includes(stageId);
-  const clampStageForRole = (stageId: number) =>
-    canAccessStage(stageId) ? stageId : stageId < 3 ? 3 : 5;
+    (!isInHouseDoctorOnly || IN_HOUSE_DOCTOR_STAGES.includes(stageId)) &&
+    (!customStageAccess || customStageAccess.read.has(stageId));
+  const canWriteStage = (stageId: number) =>
+    !customStageAccess || customStageAccess.write.has(stageId);
+  const blockReadOnlyWrite = (stageId: number) => {
+    if (canWriteStage(stageId)) return false;
+    toast.error('You have read-only access to this stage.');
+    return true;
+  };
+  const clampStageForRole = (stageId: number) => {
+    if (customStageAccess) {
+      if (canAccessStage(stageId)) return stageId;
+      const readable = Array.from(customStageAccess.read).sort((a, b) => a - b);
+      return readable.find(id => id >= stageId) ?? readable[readable.length - 1] ?? stageId;
+    }
+    return canAccessStage(stageId) ? stageId : stageId < 3 ? 3 : 5;
+  };
   const [leads, setLeads] = useState<Lead[]>([]);
   const [hospitals, setHospitals] = useState<Hospital[]>([]);
   const [doctors, setDoctors] = useState<Doctor[]>([]);
@@ -103,6 +119,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   const [isUpdatingWorkflow, setIsUpdatingWorkflow] = useState(false);
   const [isConvertingToCase, setIsConvertingToCase] = useState(false);
   const [activeWorkflowStage, setActiveWorkflowStage] = useState(1);
+  const isStageReadOnly = !canWriteStage(activeWorkflowStage);
   const detailScrollRef = useRef<HTMLDivElement>(null);
   // Opens a lead from a card or row. Clears the previous lead first, so the detail pane always
   // loads the newly clicked lead from scratch (no stale state from the lead opened before).
@@ -368,6 +385,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
     const files = Array.from(e.target.files || []);
     if (documentFileInputRef.current) documentFileInputRef.current.value = '';
     if (!selectedLead || !files.length) return;
+    if (blockReadOnlyWrite(activeWorkflowStage)) return;
     setIsUploadingDocuments(true);
     let ok = 0;
     for (const file of files) {
@@ -419,6 +437,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   // edits across stages cannot overwrite fields saved by another action.
   const persistWorkflowPatch = async (patch: Record<string, any>) => {
     if (!selectedLead) return { error: null };
+    if (!canWriteStage(activeWorkflowStage)) return { error: new Error('Read-only access to this stage') };
     const nextState = { ...(workflowStateRef.current || localWorkflowState || {}), ...patch };
     const stageData = buildStageData(nextState);
     workflowStateRef.current = nextState;
@@ -464,9 +483,12 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
     }
 
     if (!canAccessStage(stage)) {
-      toast.error('You can only access Stages 3, 4 and 5.');
+      toast.error(customStageAccess ? 'You do not have access to that stage.' : 'You can only access Stages 3, 4 and 5.');
       return;
     }
+
+    // Moving a lead out of a stage needs write access to the stage it is currently in.
+    if (blockReadOnlyWrite(activeWorkflowStage)) return;
 
     // Allow jumping to Stage 9 (Lost / Dropped) from anywhere without validation
     if (stage > activeWorkflowStage && stage !== 9) {
@@ -509,6 +531,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   const handleRestoreLead = async (leadToRestore?: Lead) => {
     const targetLead = leadToRestore || selectedLead;
     if (!targetLead) return;
+    if (blockReadOnlyWrite(9)) return;
 
     setIsUpdatingWorkflow(true);
     const rawSavedState = targetLead.id === selectedLead?.id
@@ -584,6 +607,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   // ── Stage 1: Identify Priority ──
   const handleUpdateUrgency = async (value: string) => {
     if (!selectedLead) return;
+    if (blockReadOnlyWrite(activeWorkflowStage)) return;
     const { error } = await updatePatientEnquiry(selectedLead.id, { urgency: value });
     if (error) {
       toast.error('Failed to update priority');
@@ -2168,7 +2192,12 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
     setLoading(false);
   };
 
-  const filteredLeads = leads.filter(lead =>
+  // Custom roles only see leads that are currently in a stage they can read.
+  const visibleLeads = customStageAccess
+    ? leads.filter(lead => canAccessStage(Number(lead.workflowStage) || 1))
+    : leads;
+
+  const filteredLeads = visibleLeads.filter(lead =>
     (lead.name?.toLowerCase() || "").includes(searchTerm.toLowerCase()) ||
     (lead.treatmentInterest?.toLowerCase() || "").includes(searchTerm.toLowerCase()) ||
     (lead.country?.toLowerCase() || "").includes(searchTerm.toLowerCase())
@@ -2196,6 +2225,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (blockReadOnlyWrite(1)) return;
     const leadData = {
       full_name: newLead.name,
       email: newLead.email,
@@ -2218,6 +2248,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   };
 
   const handleStatusUpdate = async (id: string, status: string) => {
+    if (blockReadOnlyWrite(Number(leads.find(item => item.id === id)?.workflowStage) || 1)) return;
     const { error } = await updateLeadStatus(id, status);
     if (error) {
       toast.error('Failed to update status');
@@ -2229,6 +2260,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
 
   const handleConvertToCase = async (lead: Lead) => {
     if (isConvertingToCase) return;
+    if (blockReadOnlyWrite(8)) return;
     setIsConvertingToCase(true);
     try {
       await runConvertToCase(lead);
@@ -2363,6 +2395,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
 
   const handleScheduleConsultation = async () => {
     if (!selectedDoctorId || !selectedLead) return;
+    if (blockReadOnlyWrite(activeWorkflowStage)) return;
 
     const { error } = await createConsultationFromEnquiry(
       selectedLead.id,
@@ -2471,7 +2504,8 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
           </div>
           <button
             onClick={() => setShowModal(true)}
-            className="flex items-center gap-2 px-6 py-3.5 bg-slate-900 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest hover:bg-teal-700 shadow-lg transition-all active:scale-95"
+            disabled={!canWriteStage(1)}
+            className="flex items-center gap-2 px-6 py-3.5 disabled:opacity-40 disabled:cursor-not-allowed bg-slate-900 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest hover:bg-teal-700 shadow-lg transition-all active:scale-95"
           >
             <Plus size={18} /> New Intake
           </button>
@@ -2526,7 +2560,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                   <h3 className="font-black text-slate-700 text-[11px] uppercase tracking-[0.2em]">{col.label}</h3>
                 </div>
                 <span className="text-[10px] font-black bg-slate-900 text-white px-3 py-1 rounded-lg">
-                  {leads.filter(l => l.status === col.id).length}
+                  {visibleLeads.filter(l => l.status === col.id).length}
                 </span>
               </div>
               <div className="space-y-4 bg-slate-100/70 p-3 rounded-3xl min-h-[620px] border border-slate-200">
@@ -2544,7 +2578,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                 <h3 className="font-black text-slate-700 text-[11px] uppercase tracking-[0.2em]">Converted Cases</h3>
               </div>
               <span className="text-[10px] font-black bg-emerald-600 text-white px-3 py-1 rounded-lg">
-                {leads.filter(l => l.status === 'won').length}
+                {visibleLeads.filter(l => l.status === 'won').length}
               </span>
             </div>
             <div className="space-y-4 bg-emerald-50/30 p-5 rounded-[3rem] min-h-[700px] border-2 border-dashed border-emerald-100/50 opacity-60">
@@ -2561,7 +2595,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                 <h3 className="font-black text-slate-700 text-[11px] uppercase tracking-[0.2em]">Lost / Dropped</h3>
               </div>
               <span className="text-[10px] font-black bg-rose-600 text-white px-3 py-1 rounded-lg">
-                {leads.filter(l => l.status === 'lost').length}
+                {visibleLeads.filter(l => l.status === 'lost').length}
               </span>
             </div>
             <div className="space-y-4 bg-rose-50/30 p-5 rounded-[3rem] min-h-[700px] border-2 border-dashed border-rose-100/50 opacity-60">
@@ -2685,7 +2719,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                  </div>
                  
                  <div className="flex justify-between relative">
-                    {STAGES.map((s) => {
+                    {STAGES.filter(s => !customStageAccess || canAccessStage(s.id)).map((s) => {
                        const isPast = s.id < activeWorkflowStage;
                        const isCurrent = s.id === activeWorkflowStage;
                        
@@ -2725,8 +2759,14 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                  </button>
               </div>
 
+              {isStageReadOnly && (
+                <div className="rounded-2xl border border-amber-200 bg-amber-50 px-5 py-3 text-xs font-black uppercase tracking-widest text-amber-800">
+                  Read-only access: you can view this stage but cannot make changes.
+                </div>
+              )}
+
               {/* STAGE-SPECIFIC WORKSPACE */}
-              <div className="min-w-0 p-10 bg-slate-50/50 rounded-[3rem] border border-slate-100 shadow-inner space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
+              <div {...({ inert: isStageReadOnly } as any)} className="min-w-0 p-10 bg-slate-50/50 rounded-[3rem] border border-slate-100 shadow-inner space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
                  <div className="flex items-start justify-between">
                     <div>
                        <h4 className="text-xl font-black text-slate-900 tracking-tight">Stage {activeWorkflowStage}: {STAGES.find(s => s.id === activeWorkflowStage)?.name}</h4>

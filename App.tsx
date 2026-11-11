@@ -277,7 +277,7 @@ const App: React.FC = () => {
       case '#/routes':
         return <FieldRoutes />;
       case '#/leads':
-        return <Leads />;
+        return <Leads roles={currentRoles} />;
       case '#/pipeline':
         return <Pipeline />;
       case '#/patients':

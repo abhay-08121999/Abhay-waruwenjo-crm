@@ -8,10 +8,20 @@ import {
   User, CheckCircle2, Clock, ArrowLeft, ChevronLeft, Check, Circle, Workflow, Archive, Trash2, RotateCcw, Save
 } from 'lucide-react';
 import { toast } from 'sonner';
+import { CrmRole, getCustomStageAccess } from '../services/roles';
 
 type ViewMode = 'TABLE' | 'BOARD';
 
-const Leads: React.FC = () => {
+const Leads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
+  // Custom roles only see and edit the stages ticked for them (Read / Write) in User & Role Management.
+  const stageAccess = getCustomStageAccess(roles, 'medical_leads');
+  const canReadMedicalStage = (stageId: number) => !stageAccess || stageAccess.read.has(stageId);
+  const canWriteMedicalStage = (stageId: number) => !stageAccess || stageAccess.write.has(stageId);
+  const blockReadOnlyMedicalWrite = (stageId: number) => {
+    if (canWriteMedicalStage(stageId)) return false;
+    toast.error('You have read-only access to this stage.');
+    return true;
+  };
   const [leads, setLeads] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
@@ -302,7 +312,20 @@ const Leads: React.FC = () => {
     }
   };
 
-  const filteredLeads = leads.filter(lead =>
+  // Workflow stage (1-5) a medical lead is currently in, read the same way the board reads it.
+  const getMedicalLeadStageId = (lead: any) => {
+    try {
+      const archived = JSON.parse(localStorage.getItem(`medical-lead-archive-${lead.id}`) || '{}');
+      if (archived.archived || archived.deleted) return 5;
+      const saved = JSON.parse(localStorage.getItem(`medical-lead-workflow-${lead.id}`) || '{}');
+      return Math.min(5, Math.max(1, Number(saved.stage) || 1));
+    } catch { return 1; }
+  };
+  const stageVisibleLeads = stageAccess
+    ? leads.filter(lead => canReadMedicalStage(getMedicalLeadStageId(lead)))
+    : leads;
+
+  const filteredLeads = stageVisibleLeads.filter(lead =>
     (lead.full_name?.toLowerCase() || "").includes(searchTerm.toLowerCase()) ||
     (lead.company_name?.toLowerCase() || "").includes(searchTerm.toLowerCase()) ||
     (lead.industry?.toLowerCase() || "").includes(searchTerm.toLowerCase())
@@ -477,6 +500,7 @@ const Leads: React.FC = () => {
     const [negotiationNote, setNegotiationNote] = useState('');
     const [sendingMoU, setSendingMoU] = useState(false);
     const saveStage3 = (updates: Record<string, any>, message?: string) => {
+      if (blockReadOnlyMedicalWrite(activeStage)) return;
       setStage3((current: any) => {
         const next = { ...current, ...updates, lastSavedAt: new Date().toISOString() };
         localStorage.setItem(stage3StorageKey, JSON.stringify(next));
@@ -485,6 +509,7 @@ const Leads: React.FC = () => {
       if (message) toast.success(message);
     };
     const saveStage4 = (updates: Record<string, any>, message?: string) => {
+      if (blockReadOnlyMedicalWrite(activeStage)) return;
       setStage4((current: any) => {
         const now = new Date().toISOString();
         const next = { ...current, ...updates, lastSavedAt: now };
@@ -660,6 +685,7 @@ const Leads: React.FC = () => {
     };
     const current = stages.find(stage => stage.id === activeStage) || stages[0];
     const toggleTask = (task: string) => {
+      if (blockReadOnlyMedicalWrite(activeStage)) return;
       const nextStageTasks = (checks[activeStage] || []).includes(task)
         ? (checks[activeStage] || []).filter(item => item !== task)
         : [...(checks[activeStage] || []), task];
@@ -670,6 +696,8 @@ const Leads: React.FC = () => {
       localStorage.setItem(storageKey, JSON.stringify({ stage: activeStage, checks: nextChecks }));
     };
     const chooseStage = (stageId: number) => {
+      if (!canReadMedicalStage(stageId)) { toast.error('You do not have access to that stage.'); return; }
+      if (stageId !== activeStage && blockReadOnlyMedicalWrite(activeStage)) return;
       if (stageId > activeStage && (stageId !== activeStage + 1 || !stageGateComplete(activeStage))) {
         toast.error('Complete the current stage checklist and required approval gates before moving forward.');
         return;
@@ -694,6 +722,7 @@ const Leads: React.FC = () => {
       return true;
     };
     const archivePartner = (deleted = false) => {
+      if (blockReadOnlyMedicalWrite(activeStage)) return;
       const confirmed = window.confirm(deleted
         ? 'Mark this partner as deleted? This is a recoverable soft-delete in this browser; it will not physically delete the Supabase lead.'
         : 'Archive this partner? It will be moved to Stage 5 and marked unavailable for active use.');
@@ -707,6 +736,7 @@ const Leads: React.FC = () => {
       toast.success(deleted ? 'Partner marked deleted in the local archive.' : 'Partner moved to Archived Partners.');
     };
     const restorePartner = () => {
+      if (blockReadOnlyMedicalWrite(activeStage)) return;
       if (!window.confirm('Restore this partner from the archive?')) return;
       const next = { ...archiveState, archived: false, deleted: false, restoredAt: new Date().toISOString() };
       localStorage.setItem(archiveStorageKey, JSON.stringify(next));
@@ -732,9 +762,15 @@ const Leads: React.FC = () => {
         <section className="bg-white border border-slate-200 rounded-[2rem] p-5 md:p-7 shadow-sm">
           <div className="flex items-center gap-2 mb-5"><Workflow size={18} className="text-indigo-600"/><h3 className="text-lg font-black text-slate-900">Partnership Workflow Stages</h3><span className="ml-auto text-xs font-bold text-slate-400">Stage {activeStage} of 5</span></div>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-            {stages.map(stage => { const complete = stageGateComplete(stage.id); const active = activeStage === stage.id; const locked = stage.id > activeStage && !(stage.id === 5 && (archiveState.archived || archiveState.deleted)); return <button key={stage.id} disabled={locked} onClick={() => chooseStage(stage.id)} className={`text-left rounded-2xl border p-4 transition-all disabled:cursor-not-allowed disabled:opacity-50 ${active ? 'border-indigo-500 bg-indigo-50 ring-2 ring-indigo-100' : complete ? 'border-emerald-200 bg-emerald-50/60 hover:border-emerald-400' : 'border-slate-200 hover:border-indigo-300 hover:bg-slate-50'}`}><div className="flex items-center gap-3"><span className={`flex h-8 w-8 items-center justify-center rounded-xl text-xs font-black ${complete ? 'bg-emerald-600 text-white' : active ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-500'}`}>{complete ? <Check size={15}/> : stage.id}</span><div className="min-w-0"><p className="font-black text-sm text-slate-800">{stage.name}</p><p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">{stage.label}</p></div></div><div className="mt-3 h-1.5 rounded-full bg-slate-100 overflow-hidden"><div className={`h-full rounded-full ${complete ? 'bg-emerald-500' : 'bg-indigo-500'}`} style={{width: `${Math.min(100, doneCount(stage.id) / stage.tasks.length * 100)}%`}}/></div><p className="mt-2 text-[10px] font-bold text-slate-400">{doneCount(stage.id)} / {stage.tasks.length} tasks complete</p></button>; })}
+            {stages.map(stage => { const complete = stageGateComplete(stage.id); const active = activeStage === stage.id; const locked = stage.id > activeStage && !(stage.id === 5 && (archiveState.archived || archiveState.deleted)); return <button key={stage.id} disabled={locked || !canReadMedicalStage(stage.id)} onClick={() => chooseStage(stage.id)} className={`text-left rounded-2xl border p-4 transition-all disabled:cursor-not-allowed disabled:opacity-50 ${active ? 'border-indigo-500 bg-indigo-50 ring-2 ring-indigo-100' : complete ? 'border-emerald-200 bg-emerald-50/60 hover:border-emerald-400' : 'border-slate-200 hover:border-indigo-300 hover:bg-slate-50'}`}><div className="flex items-center gap-3"><span className={`flex h-8 w-8 items-center justify-center rounded-xl text-xs font-black ${complete ? 'bg-emerald-600 text-white' : active ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-500'}`}>{complete ? <Check size={15}/> : stage.id}</span><div className="min-w-0"><p className="font-black text-sm text-slate-800">{stage.name}</p><p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">{stage.label}</p></div></div><div className="mt-3 h-1.5 rounded-full bg-slate-100 overflow-hidden"><div className={`h-full rounded-full ${complete ? 'bg-emerald-500' : 'bg-indigo-500'}`} style={{width: `${Math.min(100, doneCount(stage.id) / stage.tasks.length * 100)}%`}}/></div><p className="mt-2 text-[10px] font-bold text-slate-400">{doneCount(stage.id)} / {stage.tasks.length} tasks complete</p></button>; })}
           </div>
         </section>
+        {!canWriteMedicalStage(activeStage) && (
+          <div className="rounded-2xl border border-amber-200 bg-amber-50 px-5 py-3 text-xs font-black uppercase tracking-widest text-amber-800">
+            Read-only access: you can view this stage but cannot make changes.
+          </div>
+        )}
+        <div {...({ inert: !canWriteMedicalStage(activeStage) } as any)} className="space-y-6">
         <section className="bg-white border border-slate-200 rounded-[2rem] p-5 md:p-7 shadow-sm">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-5"><div><p className="text-[10px] font-black uppercase tracking-widest text-indigo-600">Stage {activeStage} Workspace</p><h3 className="text-xl font-black text-slate-900 mt-1">{current.name}</h3><p className="text-sm text-slate-500 mt-1">{current.label}</p></div><div className="flex flex-wrap gap-2"><button disabled={activeStage === 1} onClick={() => chooseStage(Math.max(1, activeStage - 1))} className="px-4 py-2 rounded-xl border border-slate-200 text-sm font-bold disabled:opacity-40"><ChevronLeft size={15} className="inline"/> Previous</button><button disabled={activeStage >= 4 || !stageGateComplete(activeStage)} onClick={() => { if (!stageGateComplete(activeStage)) { toast.error('Complete every checklist item and the required approval gate before moving to the next stage.'); return; } const nextStage = Math.min(5, activeStage + 1); chooseStage(nextStage); }} className="px-4 py-2 rounded-xl bg-indigo-600 text-white text-sm font-bold disabled:opacity-40">Next Stage <ChevronRight size={15} className="inline"/></button><button type="button" onClick={() => archivePartner(true)} className="inline-flex items-center gap-2 rounded-xl bg-red-600 px-4 py-2 text-sm font-bold text-white"><Trash2 size={15}/> Delete Lead</button></div></div>
           <div className="space-y-3">{current.tasks.map(task => { const checked = (checks[activeStage] || []).includes(task); return <button key={task} onClick={() => toggleTask(task)} className={`w-full flex items-center gap-3 text-left p-4 rounded-xl border transition-colors ${checked ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-slate-200 hover:border-indigo-300 text-slate-700'}`}>{checked ? <CheckCircle2 size={18} className="text-emerald-600 shrink-0"/> : <Circle size={18} className="text-slate-300 shrink-0"/>}<span className="text-sm font-semibold">{task}</span><span className="ml-auto text-[10px] font-black uppercase tracking-widest">{checked ? 'Done' : 'Mark done'}</span></button>; })}</div>
@@ -877,6 +913,7 @@ const Leads: React.FC = () => {
           </section>
         )}
 
+        </div>
       </div>
     );
   };
@@ -1013,10 +1050,10 @@ const Leads: React.FC = () => {
               <List size={16} /> Registry
             </button>
           </div>
-          <button onClick={() => setShowBulkImport(true)} className="flex items-center gap-2 px-5 py-3.5 bg-white text-indigo-700 border border-indigo-200 rounded-[1.5rem] text-[10px] font-black uppercase tracking-widest hover:bg-indigo-50 transition-all active:scale-95">
+          <button onClick={() => setShowBulkImport(true)} disabled={!canWriteMedicalStage(1)} className="disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2 px-5 py-3.5 bg-white text-indigo-700 border border-indigo-200 rounded-[1.5rem] text-[10px] font-black uppercase tracking-widest hover:bg-indigo-50 transition-all active:scale-95">
             <Upload size={16} /> Bulk Import
           </button>
-          <button type="button" onClick={() => setShowNewPartner(true)} className="flex items-center gap-2 px-8 py-3.5 bg-indigo-600 text-white rounded-[1.5rem] text-[10px] font-black uppercase tracking-widest hover:bg-indigo-700 shadow-xl shadow-indigo-500/20 transition-all active:scale-95">
+          <button type="button" onClick={() => setShowNewPartner(true)} disabled={!canWriteMedicalStage(1)} className="disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2 px-8 py-3.5 bg-indigo-600 text-white rounded-[1.5rem] text-[10px] font-black uppercase tracking-widest hover:bg-indigo-700 shadow-xl shadow-indigo-500/20 transition-all active:scale-95">
             <Plus size={18} /> New Partner
           </button>
         </div>
@@ -1045,7 +1082,7 @@ const Leads: React.FC = () => {
         </div>
       ) : viewMode === 'BOARD' ? (
         <div className="flex gap-6 overflow-x-auto pb-10 custom-scrollbar-hide pt-4">
-          {columns.map(col => (
+          {columns.filter(col => canReadMedicalStage(({ new: 1, qualified: 2, proposal: 3 } as Record<string, number>)[col.id] || 1)).map(col => (
             <div key={col.id} className="flex-shrink-0 w-[400px]">
               <div className="flex items-center justify-between mb-6 px-4">
                 <div className="flex items-center gap-2">
@@ -1053,7 +1090,7 @@ const Leads: React.FC = () => {
                   <h3 className="font-black text-slate-700 text-[11px] uppercase tracking-[0.2em]">{col.label}</h3>
                 </div>
                 <span className="text-[10px] font-black bg-slate-900 text-white px-3 py-1 rounded-lg">
-                  {leads.filter(l => getWorkflowBoardStatus(l) === col.id).length}
+                  {stageVisibleLeads.filter(l => getWorkflowBoardStatus(l) === col.id).length}
                 </span>
               </div>
               <div className="space-y-4 bg-slate-100/50 p-5 rounded-[3rem] min-h-[700px] border-2 border-dashed border-slate-200">
@@ -1064,14 +1101,14 @@ const Leads: React.FC = () => {
             </div>
           ))}
 
-          <div className="flex-shrink-0 w-[400px]">
+          <div className={`flex-shrink-0 w-[400px] ${canReadMedicalStage(4) ? '' : 'hidden'}`}>
             <div className="flex items-center justify-between mb-6 px-4">
               <div className="flex items-center gap-2">
                 <span className="text-emerald-600"><CheckCircle2 size={14} /></span>
                 <h3 className="font-black text-slate-700 text-[11px] uppercase tracking-[0.2em]">Active Partners</h3>
               </div>
               <span className="text-[10px] font-black bg-emerald-600 text-white px-3 py-1 rounded-lg">
-                {leads.filter(l => getWorkflowBoardStatus(l) === 'won').length}
+                {stageVisibleLeads.filter(l => getWorkflowBoardStatus(l) === 'won').length}
               </span>
             </div>
             <div className="space-y-4 bg-emerald-50/30 p-5 rounded-[3rem] min-h-[700px] border-2 border-dashed border-emerald-100/50">
@@ -1080,14 +1117,14 @@ const Leads: React.FC = () => {
               ))}
             </div>
           </div>
-          <div className="flex-shrink-0 w-[400px]">
+          <div className={`flex-shrink-0 w-[400px] ${canReadMedicalStage(5) ? '' : 'hidden'}`}>
             <div className="flex items-center justify-between mb-6 px-4">
               <div className="flex items-center gap-2">
                 <span className="text-rose-600"><Archive size={14} /></span>
                 <h3 className="font-black text-slate-700 text-[11px] uppercase tracking-[0.2em]">Dropped Medical Leads</h3>
               </div>
               <span className="text-[10px] font-black bg-rose-600 text-white px-3 py-1 rounded-lg">
-                {leads.filter(l => getWorkflowBoardStatus(l) === 'lost').length}
+                {stageVisibleLeads.filter(l => getWorkflowBoardStatus(l) === 'lost').length}
               </span>
             </div>
             <div className="space-y-4 bg-rose-50/30 p-5 rounded-[3rem] min-h-[700px] border-2 border-dashed border-rose-100/70">

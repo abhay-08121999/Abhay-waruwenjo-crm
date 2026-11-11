@@ -335,6 +335,10 @@ const slugify = (value: string) => {
     .replace(/_+/g, '_');
 };
 
+const isValidPermissionKey = (key: string) =>
+  ALL_VALID_PERMISSION_KEYS.has(key) ||
+  /^(patient_leads|medical_leads)\.stage_\d+\.(read|write)$/.test(key);
+
 const normalizePermissions = (
   input: unknown,
 ): Record<string, boolean> => {
@@ -348,7 +352,7 @@ const normalizePermissions = (
     input as Record<string, unknown>,
   )) {
     if (
-      ALL_VALID_PERMISSION_KEYS.has(key) &&
+      isValidPermissionKey(key) &&
       value === true
     ) {
       result[key] = true;
@@ -368,7 +372,7 @@ const findInvalidPermissions = (
   return Object.keys(
     input as Record<string, unknown>,
   ).filter(
-    (key) => !ALL_VALID_PERMISSION_KEYS.has(key),
+    (key) => !isValidPermissionKey(key),
   );
 };
 
@@ -863,14 +867,11 @@ const deleteRole = async (
   }
 
   const {
-    count: assignedUserCount,
+    data: assignedUsers,
     error: assignmentError,
   } = await serviceClient
     .from('crm_user_role_assignments')
-    .select('user_id', {
-      count: 'exact',
-      head: true,
-    })
+    .select('user_id')
     .eq('role_id', roleId);
 
   if (assignmentError) {
@@ -883,19 +884,74 @@ const deleteRole = async (
     );
   }
 
-  const count =
-    assignedUserCount || 0;
+  const assignedUserIds = Array.from(
+    new Set(
+      (assignedUsers || []).map(
+        (assignment: { user_id: string }) =>
+          assignment.user_id,
+      ),
+    ),
+  );
 
-  if (count > 0) {
-    return jsonResponse(
-      {
-        error:
-          `This role cannot be deleted because ${count} user${count === 1 ? '' : 's'} ${count === 1 ? 'is' : 'are'} still assigned to it. Reassign ${count === 1 ? 'the user' : 'those users'} to another role first.`,
-        assigned_user_count: count,
-        role,
-      },
-      409,
-    );
+  /*
+   * Users who still hold this role lose CRM access:
+   * their account is deactivated (same as "Deactivate user")
+   * before the role is removed.
+   */
+  for (const assignedUserId of assignedUserIds) {
+    const { error: banError } =
+      await serviceClient.auth.admin.updateUserById(
+        assignedUserId,
+        {
+          ban_duration: '876000h',
+        },
+      );
+
+    if (banError) {
+      return jsonResponse(
+        {
+          error:
+            `Unable to deactivate a user assigned to this role: ${banError.message}`,
+        },
+        500,
+      );
+    }
+
+    const { error: deactivateError } =
+      await serviceClient
+        .from('crm_user_profiles')
+        .update({
+          is_active: false,
+        })
+        .eq('user_id', assignedUserId);
+
+    if (deactivateError) {
+      return jsonResponse(
+        {
+          error:
+            `Unable to deactivate a user assigned to this role: ${deactivateError.message}`,
+        },
+        500,
+      );
+    }
+  }
+
+  if (assignedUserIds.length > 0) {
+    const { error: removeAssignmentsError } =
+      await serviceClient
+        .from('crm_user_role_assignments')
+        .delete()
+        .eq('role_id', roleId);
+
+    if (removeAssignmentsError) {
+      return jsonResponse(
+        {
+          error:
+            `Unable to remove role assignments: ${removeAssignmentsError.message}`,
+        },
+        500,
+      );
+    }
   }
 
   const { error: deleteError } =
@@ -917,6 +973,7 @@ const deleteRole = async (
   return jsonResponse({
     success: true,
     deleted_role: role,
+    deactivated_user_count: assignedUserIds.length,
   });
 };
 

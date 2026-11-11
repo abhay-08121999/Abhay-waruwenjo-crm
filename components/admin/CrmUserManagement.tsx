@@ -90,7 +90,7 @@ const STAGE_FUNCTIONS: {
 
 const DIRECT_FUNCTIONS: { label: string; read: string; write?: string }[] = [
   { label: 'Dashboard & CRM', read: 'crm.read', write: 'crm.write' },
-  { label: 'Sales Pipeline', read: 'leads.read', write: 'leads.write' },
+  { label: 'Sales Pipeline', read: 'pipeline.read', write: 'pipeline.write' },
   { label: 'Hospitals & Doctors (Clinical)', read: 'clinical.read', write: 'clinical.write' },
   { label: 'Consent Center & Vault', read: 'documents.read', write: 'documents.write' },
   { label: 'Communications & WhatsApp', read: 'communications.read', write: 'communications.write' },
@@ -528,7 +528,15 @@ const CrmUserManagement = () => {
         return;
       }
 
-      toast.success(`Role "${deletingRole.name}" deleted successfully.`);
+      const deactivatedCount = Number(
+        (result.data as { deactivated_user_count?: number } | null)?.deactivated_user_count || 0,
+      );
+
+      toast.success(
+        deactivatedCount > 0
+          ? `Role "${deletingRole.name}" deleted. ${deactivatedCount} user${deactivatedCount === 1 ? '' : 's'} deactivated.`
+          : `Role "${deletingRole.name}" deleted successfully.`,
+      );
 
       if (editingRole?.id === deletingRole.id) {
         cancelEditRole();
@@ -1318,8 +1326,8 @@ const CrmUserManagement = () => {
                   </p>
 
                   <p className="mt-2 text-sm text-slate-500">
-                    This action cannot be undone. The backend will also prevent
-                    deletion if any CRM user is still assigned to this role.
+                    This action cannot be undone. Any CRM user assigned to this
+                    role will be deactivated and lose CRM access.
                   </p>
                 </div>
               </div>

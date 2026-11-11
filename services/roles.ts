@@ -369,6 +369,13 @@ const invokeRoleFunction = async (
 const normalizeRoleName = (value: string) =>
   String(value || '').toLowerCase().replace(/[^a-z]/g, '');
 
+// A custom role is one created from User & Role Management (not a built-in system role).
+// Custom roles must only receive the permissions that were ticked for them, never the
+// built-in defaults of a system role whose name merely looks similar (e.g. "Admin 2").
+const isCustomRole = (role: CrmRole) =>
+  !role.is_system &&
+  !Object.prototype.hasOwnProperty.call(CRM_ROLE_ROUTE_ACCESS, role.key);
+
 const codeDefaultPermissionsFor = (role: CrmRole): CrmPermission[] => {
   const keyTarget = normalizeRoleName(role.key);
   const nameTarget = normalizeRoleName(role.name);
@@ -622,11 +629,13 @@ export const getMyCrmAccess = async (
 
       // Permissions defined for this role in code also apply, so module access matches the role
       // definition even when the stored role record is missing some of them (e.g. WaruBuddy).
-      codeDefaultPermissionsFor(role).forEach(
-        permission => {
-          permissions[permission] = true;
-        },
-      );
+      if (!isCustomRole(role)) {
+        codeDefaultPermissionsFor(role).forEach(
+          permission => {
+            permissions[permission] = true;
+          },
+        );
+      }
     }
 
     /* -----------------------------------------------
@@ -1231,6 +1240,100 @@ const isRouteBlockedForRoles = (
     return Boolean(match && ROLE_BLOCKED_ROUTES[match].includes(path));
   });
 
+/*
+ * Custom roles: each page opens only for the exact function that was ticked for the role
+ * in User & Role Management. The shared "module" keys (leads.*, clinical.*, crm.write ...)
+ * are NOT used for custom roles because one key opens several pages.
+ * Pages that have no row in the role permission picker (Automation, Clinical Bridge,
+ * Disputes, Orders, Inventory) are not available to custom roles.
+ */
+const CUSTOM_ROLE_ROUTE_PERMISSION: Record<string, string> = {
+  '#/': 'crm.read',
+
+  '#/hospitals': 'clinical.read',
+  '#/doctors': 'clinical.read',
+
+  '#/pipeline': 'pipeline.read',
+
+  '#/consent': 'documents.read',
+  '#/vault': 'documents.read',
+
+  '#/travel-mgmt': 'travel.read',
+  '#/logistics': 'travel.read',
+
+  '#/agreements': 'finance.read',
+  '#/quotations': 'finance.read',
+  '#/finance': 'finance.read',
+
+  '#/communications': 'communications.read',
+  '#/whatsapp': 'communications.read',
+
+  '#/patients': 'cases.read',
+
+  '#/insights': 'analytics.read',
+  '#/reports': 'analytics.read',
+
+  '#/settings': 'settings.read',
+};
+
+const hasStagePermission = (
+  permissions: Record<string, boolean>,
+  functionKey: 'patient_leads' | 'medical_leads',
+) =>
+  Object.keys(permissions).some(
+    key =>
+      permissions[key] === true &&
+      new RegExp(`^${functionKey}\\.stage_\\d+\\.(read|write)$`).test(key),
+  );
+
+const canCustomRoleAccessRoute = (
+  permissions: Record<string, boolean>,
+  path: string,
+) => {
+  if (path === '#/patient-leads') {
+    return hasStagePermission(permissions, 'patient_leads');
+  }
+
+  if (path === '#/leads') {
+    return hasStagePermission(permissions, 'medical_leads');
+  }
+
+  const required = CUSTOM_ROLE_ROUTE_PERMISSION[path];
+
+  return Boolean(required && permissions[required]);
+};
+
+/*
+ * Stage-level access for custom roles (Patient Leads / Medical Leads).
+ * Returns null for system roles (no stage restriction), otherwise the stage
+ * numbers the role can read and the stage numbers the role can write.
+ */
+export const getCustomStageAccess = (
+  roles: CrmRole[],
+  functionKey: 'patient_leads' | 'medical_leads',
+) => {
+  if (!(roles.length > 0 && roles.every(isCustomRole))) {
+    return null;
+  }
+
+  const read = new Set<number>();
+  const write = new Set<number>();
+  const pattern = new RegExp(`^${functionKey}\\.stage_(\\d+)\\.(read|write)$`);
+
+  roles.forEach(role => {
+    Object.entries(role.permissions || {}).forEach(([key, enabled]) => {
+      if (enabled !== true) return;
+      const match = key.match(pattern);
+      if (!match) return;
+      const stageNumber = Number(match[1]);
+      read.add(stageNumber);
+      if (match[2] === 'write') write.add(stageNumber);
+    });
+  });
+
+  return { read, write };
+};
+
 export const canAccessRoute = (
   roles: CrmRole[],
   permissions: Record<
@@ -1258,6 +1361,19 @@ export const canAccessRoute = (
    */
   if (isRouteBlockedForRoles(roles, path)) {
     return false;
+  }
+
+  /*
+   * Custom roles only get exactly what was ticked for them.
+   */
+  if (
+    roles.length > 0 &&
+    roles.every(isCustomRole)
+  ) {
+    return canCustomRoleAccessRoute(
+      permissions,
+      path,
+    );
   }
 
   const required =
