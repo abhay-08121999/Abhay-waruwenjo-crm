@@ -119,7 +119,10 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   const [isUpdatingWorkflow, setIsUpdatingWorkflow] = useState(false);
   const [isConvertingToCase, setIsConvertingToCase] = useState(false);
   const [activeWorkflowStage, setActiveWorkflowStage] = useState(1);
-  const isStageReadOnly = !canWriteStage(activeWorkflowStage);
+  // View-only browsing: a role that can only read the lead's own stage may still look at its other
+  // readable stages. This never moves the lead and never allows edits.
+  const [isViewOnlyStage, setIsViewOnlyStage] = useState(false);
+  const isStageReadOnly = !canWriteStage(activeWorkflowStage) || isViewOnlyStage;
   const detailScrollRef = useRef<HTMLDivElement>(null);
   // Opens a lead from a card or row. Clears the previous lead first, so the detail pane always
   // loads the newly clicked lead from scratch (no stale state from the lead opened before).
@@ -176,6 +179,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
       setSpamReason('');
       setLocalWorkflowState(null);
         setActiveWorkflowStage(clampStageForRole(Number(selectedLead.workflowStage) || 1));
+        setIsViewOnlyStage(false);
       const defaultState = {
         stage1_checklist: [],
         duplicate_check_done: false,
@@ -361,7 +365,8 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
       setAiSummaryDraft(hydratedState.ai_call_summary || '');
       setSelectedInHouseDoctor(hydratedState.assigned_doctor_name || selectedLead.assignedTo || '');
       // Rewrite legacy flat/old stage_data records into the current schema.
-      void saveLeadWorkflowState(selectedLead.id, { stage_data: buildStageData(hydratedState) })
+      // Opening a lead must not write anything for a role that only has read access to its stage.
+      if (canWriteStage(clampStageForRole(Number(selectedLead.workflowStage) || 1))) void saveLeadWorkflowState(selectedLead.id, { stage_data: buildStageData(hydratedState) })
         .then((result: any) => {
           if (result?.error) console.warn('Workflow schema migration failed:', result.error);
         })
@@ -437,7 +442,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   // edits across stages cannot overwrite fields saved by another action.
   const persistWorkflowPatch = async (patch: Record<string, any>) => {
     if (!selectedLead) return { error: null };
-    if (!canWriteStage(activeWorkflowStage)) return { error: new Error('Read-only access to this stage') };
+    if (!canWriteStage(activeWorkflowStage) || isViewOnlyStage) return { error: new Error('Read-only access to this stage') };
     const nextState = { ...(workflowStateRef.current || localWorkflowState || {}), ...patch };
     const stageData = buildStageData(nextState);
     workflowStateRef.current = nextState;
@@ -487,6 +492,14 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
       return;
     }
 
+    // Read-only on the lead's own stage: switch the view only, never move the lead or save anything.
+    const leadOwnStage = Number(selectedLead.workflowStage) || 1;
+    if (customStageAccess && !canWriteStage(leadOwnStage)) {
+      setActiveWorkflowStage(stage);
+      setIsViewOnlyStage(stage !== leadOwnStage);
+      return;
+    }
+
     // Moving a lead out of a stage needs write access to the stage it is currently in.
     if (blockReadOnlyWrite(activeWorkflowStage)) return;
 
@@ -513,6 +526,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
       toast.error('Failed to update workflow stage');
     } else {
       setActiveWorkflowStage(stage);
+      setIsViewOnlyStage(false);
       toast.success(stage === 9 ? 'Lead Dropped & Archived' : `Entered Stage: ${targetStage?.name}`);
       
       // Log Activity
@@ -2710,22 +2724,25 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
             <div className="p-10 space-y-12">
               {/* ADVANCED WORKFLOW STEPPER */}
               <div className="relative pt-6 pb-4 overflow-x-auto hide-scrollbar">
-                 <div className="min-w-[800px] px-2">
-                 <div className="absolute top-[2.2rem] left-6 right-6 h-1 bg-slate-100 -translate-y-1/2 rounded-full">
+                 <div className={customStageAccess ? 'px-2' : 'min-w-[800px] px-2'}>
+                 <div className={`absolute top-[2.2rem] left-6 right-6 h-1 bg-slate-100 -translate-y-1/2 rounded-full ${customStageAccess ? 'hidden' : ''}`}>
                     <div 
                        className="h-full bg-teal-500 transition-all duration-1000 rounded-full" 
                        style={{ width: `${((activeWorkflowStage - 1) / (STAGES.length - 1)) * 100}%` }}
                     />
                  </div>
                  
-                 <div className="flex justify-between relative">
-                    {STAGES.filter(s => !customStageAccess || canAccessStage(s.id)).map((s) => {
+                 <div className={`flex relative ${customStageAccess ? 'items-start justify-start' : 'justify-between'}`}>
+                    {STAGES.filter(s => !customStageAccess || canAccessStage(s.id)).map((s, stageIndex) => {
                        const isPast = s.id < activeWorkflowStage;
                        const isCurrent = s.id === activeWorkflowStage;
                        
                        return (
+                          <React.Fragment key={s.id}>
+                          {customStageAccess && stageIndex > 0 && (
+                             <div className={`mt-[14px] h-1 min-w-[24px] flex-1 rounded-full transition-colors duration-500 ${s.id <= activeWorkflowStage ? 'bg-teal-500' : 'bg-slate-100'}`} />
+                          )}
                           <button 
-                             key={s.id} 
                              onClick={() => handleStageJump(s.id)}
                              disabled={!canAccessStage(s.id)}
                              className={`relative z-10 flex flex-col items-center group w-[80px] ${!canAccessStage(s.id) ? 'opacity-40 cursor-not-allowed' : ''}`}
@@ -2733,16 +2750,17 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                              <div className={`w-8 h-8 rounded-xl border-2 transition-all duration-500 flex items-center justify-center font-black text-xs
                                 ${isPast ? 'bg-teal-600 border-teal-100 text-white shadow-lg' : 
                                   isCurrent ? 'bg-white border-teal-500 text-teal-600 shadow-xl scale-110' : 
-                                  'bg-white border-slate-100 text-slate-300 group-hover:border-slate-200'}`}
+                                  customStageAccess ? 'bg-white border-teal-200 text-teal-600 group-hover:border-teal-400' : 'bg-white border-slate-100 text-slate-300 group-hover:border-slate-200'}`}
                              >
                                 {isPast ? <CheckCircle2 size={14} /> : s.id}
                              </div>
                              <div className="mt-2 text-center">
-                                <p className={`text-[8px] font-black uppercase tracking-tighter transition-colors leading-tight ${isCurrent ? 'text-teal-600' : 'text-slate-400'}`}>
+                                <p className={`text-[8px] font-black uppercase tracking-tighter transition-colors leading-tight ${isCurrent ? 'text-teal-600' : customStageAccess ? 'text-slate-600' : 'text-slate-400'}`}>
                                    {s.name}
                                 </p>
                              </div>
                           </button>
+                          </React.Fragment>
                        );
                     })}
                  </div>

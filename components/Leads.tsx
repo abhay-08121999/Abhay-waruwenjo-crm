@@ -417,6 +417,15 @@ const Leads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
       catch { return { stage: 1, checks: {} }; }
     };
     const [activeStage, setActiveStage] = useState(() => readState().stage);
+    // A role that can only read the stage the lead is in may still browse its other readable stages.
+    // Browsing is view-only: it never moves the lead and never allows edits.
+    const [viewOnly, setViewOnly] = useState(false);
+    const canWriteActive = canWriteMedicalStage(activeStage) && !viewOnly;
+    const blockReadOnlyMedicalWrite = (stageId: number) => {
+      if (!viewOnly && canWriteMedicalStage(stageId)) return false;
+      toast.error('You have read-only access to this stage.');
+      return true;
+    };
     const [stage3Agreements, setStage3Agreements] = useState<any[]>([]);
     const [stage3AgreementsLoading, setStage3AgreementsLoading] = useState(false);
     const archiveStorageKey = `medical-lead-archive-${lead.id}`;
@@ -697,6 +706,14 @@ const Leads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
     };
     const chooseStage = (stageId: number) => {
       if (!canReadMedicalStage(stageId)) { toast.error('You do not have access to that stage.'); return; }
+      const savedStage = readState().stage;
+      if (stageAccess && !canWriteMedicalStage(savedStage)) {
+        // Read-only on the lead's own stage: switch the view only, do not move or save anything.
+        setActiveStage(stageId);
+        setViewOnly(stageId !== savedStage);
+        return;
+      }
+      setViewOnly(false);
       if (stageId !== activeStage && blockReadOnlyMedicalWrite(activeStage)) return;
       if (stageId > activeStage && (stageId !== activeStage + 1 || !stageGateComplete(activeStage))) {
         toast.error('Complete the current stage checklist and required approval gates before moving forward.');
@@ -762,15 +779,15 @@ const Leads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
         <section className="bg-white border border-slate-200 rounded-[2rem] p-5 md:p-7 shadow-sm">
           <div className="flex items-center gap-2 mb-5"><Workflow size={18} className="text-indigo-600"/><h3 className="text-lg font-black text-slate-900">Partnership Workflow Stages</h3><span className="ml-auto text-xs font-bold text-slate-400">Stage {activeStage} of 5</span></div>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-            {stages.map(stage => { const complete = stageGateComplete(stage.id); const active = activeStage === stage.id; const locked = stage.id > activeStage && !(stage.id === 5 && (archiveState.archived || archiveState.deleted)); return <button key={stage.id} disabled={locked || !canReadMedicalStage(stage.id)} onClick={() => chooseStage(stage.id)} className={`text-left rounded-2xl border p-4 transition-all disabled:cursor-not-allowed disabled:opacity-50 ${active ? 'border-indigo-500 bg-indigo-50 ring-2 ring-indigo-100' : complete ? 'border-emerald-200 bg-emerald-50/60 hover:border-emerald-400' : 'border-slate-200 hover:border-indigo-300 hover:bg-slate-50'}`}><div className="flex items-center gap-3"><span className={`flex h-8 w-8 items-center justify-center rounded-xl text-xs font-black ${complete ? 'bg-emerald-600 text-white' : active ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-500'}`}>{complete ? <Check size={15}/> : stage.id}</span><div className="min-w-0"><p className="font-black text-sm text-slate-800">{stage.name}</p><p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">{stage.label}</p></div></div><div className="mt-3 h-1.5 rounded-full bg-slate-100 overflow-hidden"><div className={`h-full rounded-full ${complete ? 'bg-emerald-500' : 'bg-indigo-500'}`} style={{width: `${Math.min(100, doneCount(stage.id) / stage.tasks.length * 100)}%`}}/></div><p className="mt-2 text-[10px] font-bold text-slate-400">{doneCount(stage.id)} / {stage.tasks.length} tasks complete</p></button>; })}
+            {stages.filter(stage => canReadMedicalStage(stage.id)).map(stage => { const complete = stageGateComplete(stage.id); const active = activeStage === stage.id; const locked = !(stageAccess && !canWriteMedicalStage(readState().stage)) && stage.id > activeStage && !(stage.id === 5 && (archiveState.archived || archiveState.deleted)); return <button key={stage.id} disabled={locked || !canReadMedicalStage(stage.id)} onClick={() => chooseStage(stage.id)} className={`text-left rounded-2xl border p-4 transition-all disabled:cursor-not-allowed disabled:opacity-50 ${active ? 'border-indigo-500 bg-indigo-50 ring-2 ring-indigo-100' : complete ? 'border-emerald-200 bg-emerald-50/60 hover:border-emerald-400' : 'border-slate-200 hover:border-indigo-300 hover:bg-slate-50'}`}><div className="flex items-center gap-3"><span className={`flex h-8 w-8 items-center justify-center rounded-xl text-xs font-black ${complete ? 'bg-emerald-600 text-white' : active ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-500'}`}>{complete ? <Check size={15}/> : stage.id}</span><div className="min-w-0"><p className="font-black text-sm text-slate-800">{stage.name}</p><p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">{stage.label}</p></div></div><div className="mt-3 h-1.5 rounded-full bg-slate-100 overflow-hidden"><div className={`h-full rounded-full ${complete ? 'bg-emerald-500' : 'bg-indigo-500'}`} style={{width: `${Math.min(100, doneCount(stage.id) / stage.tasks.length * 100)}%`}}/></div><p className="mt-2 text-[10px] font-bold text-slate-400">{doneCount(stage.id)} / {stage.tasks.length} tasks complete</p></button>; })}
           </div>
         </section>
-        {!canWriteMedicalStage(activeStage) && (
+        {!canWriteActive && (
           <div className="rounded-2xl border border-amber-200 bg-amber-50 px-5 py-3 text-xs font-black uppercase tracking-widest text-amber-800">
             Read-only access: you can view this stage but cannot make changes.
           </div>
         )}
-        <div {...({ inert: !canWriteMedicalStage(activeStage) } as any)} className="space-y-6">
+        <div {...({ inert: !canWriteActive } as any)} className="space-y-6">
         <section className="bg-white border border-slate-200 rounded-[2rem] p-5 md:p-7 shadow-sm">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-5"><div><p className="text-[10px] font-black uppercase tracking-widest text-indigo-600">Stage {activeStage} Workspace</p><h3 className="text-xl font-black text-slate-900 mt-1">{current.name}</h3><p className="text-sm text-slate-500 mt-1">{current.label}</p></div><div className="flex flex-wrap gap-2"><button disabled={activeStage === 1} onClick={() => chooseStage(Math.max(1, activeStage - 1))} className="px-4 py-2 rounded-xl border border-slate-200 text-sm font-bold disabled:opacity-40"><ChevronLeft size={15} className="inline"/> Previous</button><button disabled={activeStage >= 4 || !stageGateComplete(activeStage)} onClick={() => { if (!stageGateComplete(activeStage)) { toast.error('Complete every checklist item and the required approval gate before moving to the next stage.'); return; } const nextStage = Math.min(5, activeStage + 1); chooseStage(nextStage); }} className="px-4 py-2 rounded-xl bg-indigo-600 text-white text-sm font-bold disabled:opacity-40">Next Stage <ChevronRight size={15} className="inline"/></button><button type="button" onClick={() => archivePartner(true)} className="inline-flex items-center gap-2 rounded-xl bg-red-600 px-4 py-2 text-sm font-bold text-white"><Trash2 size={15}/> Delete Lead</button></div></div>
           <div className="space-y-3">{current.tasks.map(task => { const checked = (checks[activeStage] || []).includes(task); return <button key={task} onClick={() => toggleTask(task)} className={`w-full flex items-center gap-3 text-left p-4 rounded-xl border transition-colors ${checked ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-slate-200 hover:border-indigo-300 text-slate-700'}`}>{checked ? <CheckCircle2 size={18} className="text-emerald-600 shrink-0"/> : <Circle size={18} className="text-slate-300 shrink-0"/>}<span className="text-sm font-semibold">{task}</span><span className="ml-auto text-[10px] font-black uppercase tracking-widest">{checked ? 'Done' : 'Mark done'}</span></button>; })}</div>
