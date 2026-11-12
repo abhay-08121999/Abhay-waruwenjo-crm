@@ -42,6 +42,100 @@ class LeadDetailErrorBoundary extends React.Component<{ children: React.ReactNod
   }
 }
 
+const escapeEmailHtml = (value: string) => String(value || '')
+  .replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;')
+  .replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;');
+
+// Medical assessment email sent from Stage 4 (In-House Doctor Interaction).
+// Table-based layout with inline styles so it renders consistently in Gmail, Outlook and mobile mail apps.
+const buildMedicalAssessmentEmailHtml = (patientName: string, doctorName: string) => {
+  const patient = escapeEmailHtml(patientName || 'Patient');
+  const doctor = escapeEmailHtml(doctorName || 'our In-House Doctor');
+  const steps = [
+    { title: 'Medical review', text: `${doctor} is carefully reviewing the reports and information you shared.` },
+    { title: 'Personal assessment', text: 'You will receive a clear assessment of your condition and the treatment options available.' },
+    { title: 'Recommended care plan', text: 'We will propose the right hospital, specialist and procedure, along with a transparent quotation.' },
+  ];
+  const stepRows = steps.map((step, index) => `
+              <tr>
+                <td width="44" valign="top" style="padding:0 0 18px 0;">
+                  <div style="width:32px;height:32px;line-height:32px;border-radius:16px;background:#0d7a6e;color:#ffffff;font-size:14px;font-weight:700;text-align:center;font-family:Arial,Helvetica,sans-serif;">${index + 1}</div>
+                </td>
+                <td valign="top" style="padding:0 0 18px 0;font-family:Arial,Helvetica,sans-serif;">
+                  <div style="font-size:15px;font-weight:700;color:#0f172a;line-height:1.3;">${step.title}</div>
+                  <div style="font-size:14px;color:#475569;line-height:1.6;margin-top:3px;">${step.text}</div>
+                </td>
+              </tr>`).join('');
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Your personal medical assessment</title>
+</head>
+<body style="margin:0;padding:0;background:#eef4f3;">
+<div style="display:none;max-height:0;overflow:hidden;opacity:0;color:#eef4f3;">${doctor} is personally reviewing your medical information.</div>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#eef4f3;">
+  <tr>
+    <td align="center" style="padding:32px 14px;">
+      <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:600px;background:#ffffff;border-radius:20px;overflow:hidden;box-shadow:0 8px 30px rgba(15,23,42,0.08);">
+        <tr>
+          <td align="center" style="background:#0d7a6e;background-image:linear-gradient(135deg,#0a5f55 0%,#0d7a6e 55%,#17a392 100%);padding:40px 32px 36px 32px;">
+            <div style="font-family:Arial,Helvetica,sans-serif;font-size:12px;font-weight:700;letter-spacing:3px;color:#b8efe6;text-transform:uppercase;">WaruWenJo Healthcare</div>
+            <div style="width:46px;height:3px;background:#ffffff;opacity:0.7;border-radius:2px;margin:14px auto 18px auto;"></div>
+            <h1 style="margin:0;font-family:Georgia,'Times New Roman',serif;font-size:28px;line-height:1.25;color:#ffffff;font-weight:700;">Your personal medical assessment is in progress</h1>
+            <p style="margin:12px 0 0 0;font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:1.6;color:#d6f5f0;">A dedicated doctor is looking after your case.</p>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:34px 36px 8px 36px;font-family:Arial,Helvetica,sans-serif;">
+            <p style="margin:0 0 14px 0;font-size:17px;font-weight:700;color:#0f172a;">Dear ${patient},</p>
+            <p style="margin:0;font-size:15px;line-height:1.75;color:#334155;">Thank you for trusting WaruWenJo with your care. <strong style="color:#0d7a6e;">${doctor}</strong> has reviewed your medical information and will guide you through the next steps of your treatment journey.</p>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:22px 36px 6px 36px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f0faf8;border:1px solid #cdeee8;border-radius:14px;">
+              <tr>
+                <td style="padding:22px 22px 6px 22px;">
+                  <div style="font-family:Arial,Helvetica,sans-serif;font-size:11px;font-weight:700;letter-spacing:2px;color:#0d7a6e;text-transform:uppercase;margin-bottom:16px;">What happens next</div>
+                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">${stepRows}
+                  </table>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:20px 36px 8px 36px;font-family:Arial,Helvetica,sans-serif;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-left:4px solid #0d7a6e;background:#f8fafc;border-radius:0 10px 10px 0;">
+              <tr>
+                <td style="padding:14px 18px;font-size:14px;line-height:1.7;color:#475569;">Our team will contact you shortly with the assessment and recommendations. If you have new reports or any questions in the meantime, simply reply to this email and we will be happy to help.</td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:24px 36px 36px 36px;font-family:Arial,Helvetica,sans-serif;">
+            <p style="margin:0;font-size:15px;line-height:1.7;color:#334155;">Warm regards,<br><strong style="color:#0f172a;">The WaruWenJo Clinical Team</strong><br><span style="font-size:13px;color:#64748b;">Medical Tourism &amp; Patient Care</span></p>
+          </td>
+        </tr>
+        <tr>
+          <td align="center" style="background:#0f172a;padding:22px 30px;font-family:Arial,Helvetica,sans-serif;">
+            <div style="font-size:13px;font-weight:700;color:#ffffff;letter-spacing:1px;">WaruWenJo Healthcare</div>
+            <div style="font-size:12px;line-height:1.6;color:#94a3b8;margin-top:6px;">Your trusted medical tourism partner.<br>This message was sent to you regarding your medical enquiry.</div>
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table>
+</body>
+</html>`;
+};
+
 const MOM_FIELDS: [string, string][] = [
   ['mom_date_time', 'Date / time'],
   ['mom_participants', 'Participants'],
@@ -1513,7 +1607,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
     const result = await sendCrmEmail(
       selectedLead.email,
       'Your personal medical assessment is in progress',
-      `<p>Dear ${selectedLead.name || 'Patient'},</p><p>${doctorName} has reviewed your medical information and will guide you through the next steps.</p><p>Our team will contact you with the assessment and recommendations.</p>`,
+      buildMedicalAssessmentEmailHtml(selectedLead.name || 'Patient', doctorName),
       selectedLead.name || 'Patient'
     );
     if (result?.error) {
