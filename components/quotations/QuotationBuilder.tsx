@@ -3,7 +3,7 @@ import { supabase } from '../../integrations/supabase/client';
 import { ArrowLeft, Save, Send, Plus, Trash2, FileText, ChevronDown, Upload, CheckCircle, Eye, X, Printer } from 'lucide-react';
 import { jsPDF } from 'jspdf';
 import html2canvas from 'html2canvas';
-import { toast } from 'sonner';
+import { toast, Toaster } from 'sonner';
 import Tesseract from 'tesseract.js';
 import { sendQuotationEmail } from '../../lib/quotationEmail';
 
@@ -696,6 +696,7 @@ const QuotationBuilder: React.FC<QuotationBuilderProps> = ({ quotationId, onBack
   };
 
   return (<>
+    <Toaster richColors position="top-right" />
     <div className="bg-white rounded-[2rem] shadow-sm border border-slate-200 overflow-hidden min-h-[700px] flex flex-col">
       {/* Header */}
       <div className="p-6 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">

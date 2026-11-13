@@ -1,5 +1,3 @@
-
-
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { supabase } from '../integrations/supabase/client';
@@ -22,7 +20,7 @@ import { jsPDF } from 'jspdf';
 
 import html2canvas from 'html2canvas';
 
-import { toast } from 'sonner';
+import { toast, Toaster } from 'sonner';
 
 
 
@@ -373,6 +371,7 @@ const TextAreaField: React.FC<FieldProps & { rows?: number }> = ({
 const AgreementModule: React.FC = () => {
 
   const [tab, setTab] = useState<Tab>('list');
+  const [docMenuOpen, setDocMenuOpen] = useState(false);
 
   const [agreements, setAgreements] = useState<AgreementRow[]>([]);
 
@@ -976,7 +975,7 @@ const AgreementModule: React.FC = () => {
 
       const pdf = new jsPDF('p', 'mm', 'a4');
 
-      const image = canvas.toDataURL('image/png');
+      const image = canvas.toDataURL('image/jpeg', 0.92);
 
 
 
@@ -994,7 +993,7 @@ const AgreementModule: React.FC = () => {
 
 
 
-      pdf.addImage(image, 'PNG', 0, position, pageWidth, imageHeight);
+      pdf.addImage(image, 'JPEG', 0, position, pageWidth, imageHeight, undefined, 'FAST');
 
 
 
@@ -1008,7 +1007,7 @@ const AgreementModule: React.FC = () => {
 
         pdf.addPage();
 
-        pdf.addImage(image, 'PNG', 0, position, pageWidth, imageHeight);
+        pdf.addImage(image, 'JPEG', 0, position, pageWidth, imageHeight, undefined, 'FAST');
 
         remaining -= pageHeight;
 
@@ -1115,6 +1114,7 @@ const AgreementModule: React.FC = () => {
         throw new Error('The database did not return the saved MOU ID.');
 
       }
+      setSelectedId(saved.id);
 
 
 
@@ -1154,7 +1154,15 @@ const AgreementModule: React.FC = () => {
 
       if (uploadError) {
 
-        throw new Error(`MOU saved, but PDF upload failed: ${uploadError.message}`);
+        const uploadMessage = String(uploadError.message || '');
+        const uploadHint = /bucket not found/i.test(uploadMessage)
+          ? ' The "agreements" Storage bucket does not exist; run the agreements bucket migration.'
+          : /row-level security|policy|not authorized|permission/i.test(uploadMessage)
+            ? ' Storage policies for the "agreements" bucket are missing; run the agreements bucket migration.'
+            : /exceeded|too large|maximum/i.test(uploadMessage)
+              ? ' The PDF is larger than the bucket size limit.'
+              : '';
+        throw new Error(`MOU saved, but PDF upload failed: ${uploadMessage}.${uploadHint} Click Save again to retry.`);
 
       }
 
@@ -1662,6 +1670,7 @@ const AgreementModule: React.FC = () => {
   return (
 
     <div className="space-y-6 pb-10">
+      <Toaster richColors position="top-right" />
 
       <header className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
 
@@ -1695,17 +1704,30 @@ const AgreementModule: React.FC = () => {
 
 
 
-        <button
-
-          onClick={startNew}
-
-          className="inline-flex items-center justify-center gap-2 rounded-xl bg-slate-900 px-5 py-3 text-sm font-bold text-white shadow-lg hover:bg-slate-800"
-
-        >
-
-          <Plus size={17} /> New MOU
-
-        </button>
+        <div className="relative">
+          <button
+            onClick={() => setDocMenuOpen((open) => !open)}
+            aria-haspopup="menu"
+            aria-expanded={docMenuOpen}
+            className="inline-flex items-center justify-center gap-2 rounded-xl bg-slate-900 px-5 py-3 text-sm font-bold text-white shadow-lg hover:bg-slate-800"
+          >
+            <Plus size={17} /> Document <ChevronDown size={16} className={`transition-transform ${docMenuOpen ? 'rotate-180' : ''}`} />
+          </button>
+          {docMenuOpen && (
+            <>
+              <div className="fixed inset-0 z-10" onClick={() => setDocMenuOpen(false)} />
+              <div role="menu" className="absolute right-0 z-20 mt-2 w-56 overflow-hidden rounded-xl border border-slate-200 bg-white p-1 shadow-xl">
+                <button
+                  role="menuitem"
+                  onClick={() => { setDocMenuOpen(false); startNew(); }}
+                  className="flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-sm font-bold text-slate-700 hover:bg-slate-50"
+                >
+                  <FileSignature size={16} className="text-teal-700" /> MOU
+                </button>
+              </div>
+            </>
+          )}
+        </div>
 
       </header>
 
@@ -1717,7 +1739,7 @@ const AgreementModule: React.FC = () => {
 
           ['list', FileText, 'All MOUs'],
 
-          ['builder', FileSignature, 'MOU Builder'],
+          ['builder', FileSignature, 'Agreement Builder'],
 
           ['templates', LayoutTemplate, 'Templates']
 

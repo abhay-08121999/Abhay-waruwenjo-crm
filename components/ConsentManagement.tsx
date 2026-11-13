@@ -3,11 +3,13 @@ import { fetchConsentForms, createConsentForm, updateConsentForm } from '../serv
 import { ConsentForm } from '../types.ts';
 import { FileCheck, Signature, Plus, ShieldCheck, AlertCircle, Clock, Download, X, User, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
+import ConsentLetterManager from './ConsentLetterManager.tsx';
 
 const ConsentManagement: React.FC = () => {
   const [forms, setForms] = useState<ConsentForm[]>([]);
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
+  const [section, setSection] = useState<'letters' | 'digital'>('letters');
   const [newForm, setNewForm] = useState<Partial<ConsentForm>>({
     type: 'Surgical',
     version: 'v1.0'
@@ -54,8 +56,32 @@ const ConsentManagement: React.FC = () => {
     }
   };
 
+  const sectionSwitch = (
+    <nav className="flex flex-wrap gap-2 rounded-2xl border border-slate-200 bg-white p-2">
+      {([['letters', 'Consent Letters'], ['digital', 'Digital Consents']] as const).map(([key, label]) => (
+        <button
+          key={key}
+          onClick={() => setSection(key)}
+          className={`rounded-xl px-4 py-2.5 text-sm font-bold transition ${section === key ? 'bg-teal-700 text-white' : 'text-slate-600 hover:bg-slate-50'}`}
+        >
+          {label}
+        </button>
+      ))}
+    </nav>
+  );
+
+  if (section === 'letters') {
+    return (
+      <div className="space-y-6">
+        {sectionSwitch}
+        <ConsentLetterManager />
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-8 animate-in fade-in duration-700 pb-12">
+      {sectionSwitch}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
         <div>
           <div className="flex items-center gap-3 mb-2">

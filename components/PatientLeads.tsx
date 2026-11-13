@@ -250,6 +250,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   const [isSendingDocumentRequest, setIsSendingDocumentRequest] = useState(false);
   const [isSendingVilForm, setIsSendingVilForm] = useState(false);
   const [vilSubmission, setVilSubmission] = useState<any>(null);
+  const [vilLoadError, setVilLoadError] = useState('');
   const [showSpamReasonPicker, setShowSpamReasonPicker] = useState(false);
   const [spamReason, setSpamReason] = useState('');
   const SPAM_REASONS = ['Spam / Fake Enquiry', 'Invalid Contact Information', 'Test Entry', 'Not a Genuine Patient Interest', 'Duplicate of Existing Lead', 'Other'];
@@ -528,7 +529,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
       stage3: stage(3, 'Medical Documents', 'Documents', 'stage3_checklist', ['process_explained_at', 'document_request_sent_at', 'documents_received_count', 'document_request_whatsapp_message']),
       stage4: stage(4, 'In-House Doctor Interaction', 'Doctor Inbox', 'stage4_checklist', ['assigned_doctor_name', 'doctor_inbox_status', 'doctor_assigned_at', 'doctor_call_notes', 'doctor_call_at', 'personal_email_sent_at', 'initial_doctor_assessment', 'doctor_next_steps', 'doctor_interaction_complete', 'doctor_call_notes_saved_at', 'initial_doctor_assessment_saved_at']),
       stage5: stage(5, 'Clinical Qualification & Planning', 'Clinical', 'stage5_checklist', ['suggested_hospital', 'suggested_hospital_id', 'suggested_surgeon', 'suggested_surgeon_id', 'suggested_hospitals', 'suggested_surgeons', 'suggested_procedures', 'illness_history', 'clinical_summary', 'clinical_recommendation_finalized', 'clinical_review_confirmed', 'clinical_review_confirmed_at', 'clinical_review_confirmed_by', 'clinical_decision', 'clinical_report_generated_at']),
-      stage6: stage(6, 'Financial & Logistics Proposal', 'BDM Pipeline', 'stage6_checklist', ['quotation_details', 'quotation_items', 'travel_accommodation', 'patient_concerns', 'financial_proposal_pdf', 'proposal_sent_at', 'patient_interest', 'patient_interest_reason', 'estimated_cost_min', 'estimated_cost_max', 'estimated_cost_currency', 'estimated_cost_notes', 'specialist_consultation_booked']),
+      stage6: stage(6, 'Financial & Logistics Proposal', 'BDM Pipeline', 'stage6_checklist', ['quotation_details', 'quotation_items', 'travel_accommodation', 'patient_concerns', 'financial_proposal_pdf', 'proposal_sent_at', 'patient_interest', 'patient_interest_reason', 'selected_quotation_id', 'selected_quotation_label', 'selected_quotation_total', 'selected_quotation_currency', 'selected_quotation_at', 'selected_quotation_sent_at', 'estimated_cost_min', 'estimated_cost_max', 'estimated_cost_currency', 'estimated_cost_notes', 'specialist_consultation_booked']),
       stage7: stage(7, 'Specialist Consultation, Payment & Confirmation', 'Specialist Consult & Payment', 'stage7_checklist', ['specialist_call_completed_at', 'specialist_call_notes', 'mom_date_time', 'mom_participants', 'mom_discussion_points', 'mom_specialist_observations', 'mom_patient_questions', 'mom_decisions', 'mom_next_steps', 'mom_instructions', 'mom_recorded_at', 'mom_pdf_path', 'mom_pdf_url', 'bdm_call_completed_at', 'bdm_call_notes', 'quotation_agreement_confirmed', 'clinical_process_agreement_confirmed', 'stage7_patient_decision', 'stage7_disagreement_reason', 'stage7_disagreement_concern', 'stage7_disagreement_followup', 'request_to_proceed_confirmed', 'request_to_proceed_at', 'payment_link', 'payment_reference', 'payment_link_provided_at', 'payment_status', 'payment_date_time', 'payment_amount', 'advance_payment_verified', 'vil_form_sent_at']),
       stage8: stage(8, 'Medical Case Handover', 'CDM/WaruBuddy Handover', 'stage8_checklist', ['medical_case_id', 'converted_at', 'handover_prepared_at', 'patient_user_id', 'patient_patient_id', 'patient_account_created_at', 'patient_account_status', 'patient_account_error', 'patient_invitation_sent_at', 'handover_bdm_name', 'handover_cdm_team', 'handover_status', 'handover_case_information', 'clinical_information_shared', 'financial_information_shared', 'specialist_mom_information_shared', 'handover_initiated_at', 'handover_accepted_at', 'case_ownership_confirmed_at', 'stage8_completed_at']),
       stage9: stage(9, 'Lost / Dropped', 'Archived', 'stage9_checklist', ['dropoff_reason', 'archived_at', 'dropped_from_stage', 'dropped_at', 'resume_stage']),
@@ -1286,20 +1287,64 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
     toast.success('Stage 8 completed');
   };
 
+  const handleSelectQuotation = async (quotation: { id: string; label: string; total: number; currency: string }) => {
+    await saveStage6Task('Select Patient Quotation', {
+      selected_quotation_id: quotation.id,
+      selected_quotation_label: quotation.label,
+      selected_quotation_total: quotation.total,
+      selected_quotation_currency: quotation.currency,
+      selected_quotation_at: new Date().toISOString(),
+      selected_quotation_sent_at: null,
+    });
+  };
+
+  const handleSelectedQuotationSent = async (quotation: { id: string; label: string }) => {
+    const sentAt = new Date().toISOString();
+    await saveStage6Task('Send Selected Quotation', { selected_quotation_sent_at: sentAt, proposal_sent_at: sentAt });
+    if (selectedLead) {
+      await logAdminActivity('Selected Quotation Emailed to Patient', 'Patient Lead', selectedLead.id, {
+        email: selectedLead.email,
+        quotation_id: quotation.id,
+        quotation: quotation.label,
+      });
+      loadActivityLogs(selectedLead.id);
+    }
+  };
+
   const handleConfirmPatientInterest = async (interest: 'Agreed' | 'Disagreed') => {
     await saveStage6Task('Confirm Patient Interest Via Call', { patient_interest: interest });
     toast.success(`Patient interest recorded: ${interest}`);
   };
 
   const loadVilSubmission = async (leadId: string) => {
-    const { data } = await supabase.from('vil_form_submissions').select('*').eq('lead_id', leadId).maybeSingle();
-    setVilSubmission(data || null);
+    const { data, error } = await supabase.from('patient_enquiries').select('vil_data').eq('id', leadId).maybeSingle();
+    if (error) {
+      console.error('[VIL] Could not load submission:', error);
+      setVilLoadError(error.message || 'Could not load the VIL submission');
+      setVilSubmission(null);
+      return;
+    }
+    setVilLoadError('');
+    setVilSubmission(data?.vil_data || null);
   };
 
   useEffect(() => {
     if (selectedLead?.id) loadVilSubmission(selectedLead.id);
     else setVilSubmission(null);
   }, [selectedLead?.id]);
+
+  const openVilDocument = async (doc: any) => {
+    if (doc?.bucket !== 'vil_docs') {
+      if (doc?.file_url) window.open(doc.file_url, '_blank', 'noopener');
+      return;
+    }
+    const { data, error } = await supabase.storage.from('vil_docs').createSignedUrl(doc.file_path, 3600);
+    if (error || !data?.signedUrl) {
+      toast.error(error?.message || 'Could not open the VIL document');
+      return;
+    }
+    window.open(data.signedUrl, '_blank', 'noopener');
+  };
 
   const handleSendVilForm = async () => {
     if (isSendingVilForm) return;
@@ -3449,13 +3494,27 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
 
                        {activeWorkflowStage === 6 && (
                           <div className="space-y-4">
-                            <LeadQuotationPanel lead={selectedLead} />
+                            <LeadQuotationPanel
+                              lead={selectedLead}
+                              selectedQuotationId={localWorkflowState?.selected_quotation_id || null}
+                              selectedQuotationSentAt={localWorkflowState?.selected_quotation_sent_at || null}
+                              onSelectQuotation={handleSelectQuotation}
+                              onQuotationSent={handleSelectedQuotationSent}
+                              readOnly={isStageReadOnly}
+                            />
 
                             <div className="p-6 bg-slate-50 rounded-[2rem] border border-slate-100">
                                   <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-4 text-center">Patient Decision</p>
                                   <p className="text-xs text-slate-600 font-bold text-center mb-6 px-4">
                                     Are you interested to proceed with the following procedures suggested by the doctor?
                                   </p>
+                                  {localWorkflowState?.selected_quotation_id && (
+                                    <p className="text-[10px] font-black text-emerald-700 uppercase tracking-widest text-center mb-4">
+                                      Patient's choice: {localWorkflowState?.selected_quotation_label || 'Selected quotation'}
+                                      {localWorkflowState?.selected_quotation_total ? ` · ${localWorkflowState?.selected_quotation_currency || ''} ${Number(localWorkflowState.selected_quotation_total).toLocaleString()}` : ''}
+                                      {localWorkflowState?.selected_quotation_sent_at ? ' · emailed' : ' · not emailed yet'}
+                                    </p>
+                                  )}
                                   <div className="flex gap-4 justify-center">
                                     <button 
                                       onClick={() => {
@@ -3571,6 +3630,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                                     <p className={`text-[10px] font-black uppercase tracking-widest ${vilSubmission ? 'text-teal-700' : 'text-slate-400'}`}>{vilSubmission ? `✓ Submitted ${new Date(vilSubmission.submitted_at).toLocaleString()}` : 'Awaiting patient submission'}</p>
                                     <button onClick={() => selectedLead?.id && loadVilSubmission(selectedLead.id)} className="text-[9px] font-black text-indigo-700 uppercase tracking-widest">Refresh status</button>
                                   </div>
+                                  {vilLoadError && <p className="mt-2 text-[10px] font-bold text-rose-600">Could not load submission: {vilLoadError}</p>}
                                   {vilSubmission && (
                                     <div className="mt-4 space-y-3">
                                       <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
@@ -3587,7 +3647,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                                           return (
                                             <div key={item.key} className="flex items-center justify-between gap-3 p-2 bg-white rounded-lg">
                                               <p className="text-xs text-slate-700">{item.label}</p>
-                                              {doc ? <a href={doc.file_url} target="_blank" rel="noreferrer" className="text-[10px] font-bold text-indigo-600 underline truncate max-w-[200px]">{doc.file_name}</a> : <span className="text-[10px] text-rose-600 font-bold">Missing</span>}
+                                              {doc ? <button type="button" onClick={() => openVilDocument(doc)} className="text-[10px] font-bold text-indigo-600 underline truncate max-w-[200px]">{doc.file_name}</button> : <span className="text-[10px] text-rose-600 font-bold">Missing</span>}
                                             </div>
                                           );
                                         })}
