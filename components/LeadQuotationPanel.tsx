@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Plus, Pencil, Eye, EyeOff, ExternalLink, RefreshCw } from 'lucide-react';
+import { Plus, Pencil, Eye, EyeOff, ExternalLink, RefreshCw, FileText } from 'lucide-react';
 import { supabase } from '../integrations/supabase/client';
 
 interface LeadQuotationPanelProps {
@@ -10,57 +10,65 @@ interface LeadQuotationPanelProps {
   };
 }
 
+type QuotationItem = {
+  id: string;
+  pdfUrl: string;
+  generatedAt: string;
+  currency: string;
+  total: number;
+};
+
 const LeadQuotationPanel: React.FC<LeadQuotationPanelProps> = ({ lead }) => {
-  const [quotationPdf, setQuotationPdf] = useState<any | null>(null);
-  const [loadingPdf, setLoadingPdf] = useState(false);
-  const [showPreview, setShowPreview] = useState(false);
+  const [quotations, setQuotations] = useState<QuotationItem[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
 
-  // Latest quotation PDF saved for this lead in the Quotations module
+  // All quotation PDFs saved for this lead in the Quotations module, newest first
   useEffect(() => {
     let cancelled = false;
-    const loadQuotationPdf = async () => {
-      setLoadingPdf(true);
+    const loadQuotations = async () => {
+      setLoading(true);
       const { data, error } = await supabase
         .from('quotations')
         .select('id, pdf_path, pdf_generated_at, currency, total_amount')
         .eq('lead_id', lead.id)
         .not('pdf_path', 'is', null)
-        .order('pdf_generated_at', { ascending: false })
-        .limit(1)
-        .maybeSingle();
+        .order('pdf_generated_at', { ascending: false });
       if (cancelled) return;
-      setLoadingPdf(false);
+      setLoading(false);
 
       if (error) {
-        console.error('Error loading quotation PDF:', error);
-        setQuotationPdf(null);
-        return;
-      }
-      if (!data) {
-        setQuotationPdf(null);
+        console.error('Error loading quotations:', error);
+        setQuotations([]);
         return;
       }
 
-      const { data: publicData } = supabase.storage
-        .from('quotation-pdfs')
-        .getPublicUrl(data.pdf_path);
-
-      setQuotationPdf({
-        id: data.id,
-        pdfUrl: publicData.publicUrl,
-        generatedAt: data.pdf_generated_at,
-        currency: data.currency,
-        total: data.total_amount,
-      });
+      setQuotations(
+        (data || []).map((row: any) => ({
+          id: row.id,
+          pdfUrl: supabase.storage.from('quotation-pdfs').getPublicUrl(row.pdf_path).data.publicUrl,
+          generatedAt: row.pdf_generated_at,
+          currency: row.currency,
+          total: row.total_amount,
+        })),
+      );
     };
-    loadQuotationPdf();
+    loadQuotations();
     return () => {
       cancelled = true;
     };
   }, [lead.id, refreshKey]);
 
-  // Opens the Quotations module, pre-selecting this patient (or an existing quotation)
+  // Reload the list when the staff member returns from the Quotations module
+  useEffect(() => {
+    const onFocus = () => setRefreshKey((k) => k + 1);
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, []);
+
+  // Opens the Quotations module, pre-selecting this patient.
+  // Without a quotation id it starts a NEW quotation; with one it opens that quotation for editing.
   const openQuotations = (quotationId?: string) => {
     sessionStorage.setItem('quotation_prefill_lead_id', lead.id);
     if (quotationId) sessionStorage.setItem('quotation_open_id', quotationId);
@@ -68,68 +76,77 @@ const LeadQuotationPanel: React.FC<LeadQuotationPanelProps> = ({ lead }) => {
     window.location.hash = '#/quotations';
   };
 
+  const btnPrimary = 'flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 text-white rounded-lg text-[9px] font-black uppercase tracking-widest hover:bg-indigo-700 transition-all shadow-sm';
+  const btnSoft = 'flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 text-indigo-600 rounded-lg text-[9px] font-black uppercase tracking-widest hover:bg-indigo-600 hover:text-white transition-all';
+
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between pl-1">
-        <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Quotation</label>
-        <button
-          onClick={() => openQuotations(quotationPdf?.id)}
-          className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 text-white rounded-lg text-[9px] font-black uppercase tracking-widest hover:bg-indigo-700 transition-all shadow-sm"
-        >
-          {quotationPdf ? <><Pencil size={12} /> Edit Quotation</> : <><Plus size={12} /> Create Quotation</>}
-        </button>
+      <div className="flex items-center justify-between gap-3 flex-wrap pl-1">
+        <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest">
+          Quotations {quotations.length > 0 && <span className="text-indigo-600">({quotations.length})</span>}
+        </label>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setRefreshKey((k) => k + 1)}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 text-slate-600 rounded-lg text-[9px] font-black uppercase tracking-widest hover:bg-slate-200 transition-all"
+          >
+            <RefreshCw size={12} /> Refresh
+          </button>
+          <button onClick={() => openQuotations()} className={btnPrimary}>
+            <Plus size={12} /> Create Quotation
+          </button>
+        </div>
       </div>
 
-      {quotationPdf?.pdfUrl ? (
-        <div className="space-y-4">
-          <div className="flex items-center justify-between p-4 bg-white border border-slate-100 rounded-2xl">
-            <div>
-              <p className="text-[11px] font-black text-slate-800">
-                {quotationPdf.currency} {Number(quotationPdf.total || 0).toLocaleString()}
-              </p>
-              <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">
-                Generated {new Date(quotationPdf.generatedAt).toLocaleDateString()}
-              </p>
-            </div>
-            <button
-              onClick={() => setShowPreview((v) => !v)}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 text-indigo-600 rounded-lg text-[9px] font-black uppercase tracking-widest hover:bg-indigo-600 hover:text-white transition-all"
-            >
-              {showPreview ? <><EyeOff size={12} /> Hide Preview</> : <><Eye size={12} /> Preview</>}
-            </button>
-          </div>
-
-          {showPreview && (
-            <div className="bg-white border border-slate-100 rounded-2xl overflow-hidden">
-              <div className="flex items-center justify-between px-4 py-3 border-b border-slate-100">
-                <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Quotation PDF</p>
-                <a
-                  href={quotationPdf.pdfUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 text-indigo-600 rounded-lg text-[9px] font-black uppercase tracking-widest hover:bg-indigo-600 hover:text-white transition-all"
-                >
-                  <ExternalLink size={12} /> Open in new tab
-                </a>
-              </div>
-              <iframe src={quotationPdf.pdfUrl} title="Quotation PDF" className="w-full h-[600px]" />
-            </div>
-          )}
-        </div>
-      ) : (
+      {quotations.length === 0 ? (
         <div className="p-8 border-2 border-dashed border-slate-100 rounded-[2rem] text-center">
           <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">
-            {loadingPdf ? 'Loading quotation...' : 'No quotation PDF yet'}
+            {loading ? 'Loading quotations...' : 'No quotation PDF yet'}
           </p>
-          {!loadingPdf && (
-            <button
-              onClick={() => setRefreshKey((k) => k + 1)}
-              className="mt-4 inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 text-slate-600 rounded-lg text-[9px] font-black uppercase tracking-widest hover:bg-slate-200 transition-all"
-            >
-              <RefreshCw size={12} /> Refresh
-            </button>
-          )}
         </div>
+      ) : (
+        quotations.map((q, idx) => {
+          const isOpen = expandedId === q.id;
+          return (
+            <div key={q.id} className="bg-white border border-slate-100 rounded-2xl overflow-hidden">
+              <div className="flex items-center justify-between gap-3 flex-wrap p-4">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="w-9 h-9 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
+                    <FileText size={16} />
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-[11px] font-black text-slate-800">
+                      Quotation {quotations.length - idx} · {q.currency} {Number(q.total || 0).toLocaleString()}
+                    </p>
+                    <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">
+                      Generated {new Date(q.generatedAt).toLocaleDateString()}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button onClick={() => setExpandedId(isOpen ? null : q.id)} className={btnSoft}>
+                    {isOpen ? <><EyeOff size={12} /> Hide</> : <><Eye size={12} /> Preview</>}
+                  </button>
+                  <button onClick={() => openQuotations(q.id)} className={btnSoft}>
+                    <Pencil size={12} /> Edit
+                  </button>
+                </div>
+              </div>
+
+              {isOpen && (
+                <div className="border-t border-slate-100">
+                  <div className="flex items-center justify-between px-4 py-3">
+                    <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Quotation PDF</p>
+                    <a href={q.pdfUrl} target="_blank" rel="noreferrer" className={btnSoft}>
+                      <ExternalLink size={12} /> Open in new tab
+                    </a>
+                  </div>
+                  <iframe src={q.pdfUrl} title={`Quotation ${quotations.length - idx}`} className="w-full h-[600px]" />
+                </div>
+              )}
+            </div>
+          );
+        })
       )}
     </div>
   );

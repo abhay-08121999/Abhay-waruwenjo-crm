@@ -24,6 +24,7 @@ import FinanceModule from './components/FinanceModule.tsx';
 import AgreementModule from './components/AgreementModule.tsx';
 import PatientLeads from './components/PatientLeads.tsx';
 import PatientDocumentUpload from './components/PatientDocumentUpload.tsx';
+import VilPublicForm from './components/VilPublicForm.tsx';
 import Hospitals from './components/Hospitals.tsx';
 import Doctors from './components/Doctors.tsx';
 import AdminLogin from './components/AdminLogin.tsx';
@@ -215,6 +216,11 @@ const App: React.FC = () => {
   const patientDocumentMatch = currentHash.match(/^#\/patient-documents\/([^/?]+)/);
   if (patientDocumentMatch) {
     return <PatientDocumentUpload leadId={decodeURIComponent(patientDocumentMatch[1])} />;
+  }
+
+  const vilFormMatch = currentHash.match(/^#\/vil-form\/([^/?]+)/);
+  if (vilFormMatch) {
+    return <VilPublicForm leadId={decodeURIComponent(vilFormMatch[1])} />;
   }
 
   // Show login page if not authenticated or on login route

@@ -10,8 +10,8 @@ const formatSize = (bytes: number) =>
   bytes >= 1024 * 1024 ? `${(bytes / (1024 * 1024)).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
 
 // National ID files are stored with a prefix so the clinical team can tell them apart from medical documents.
-const NATIONAL_ID_PREFIXES = { patient: 'NATIONAL_ID_PATIENT__', companion: 'NATIONAL_ID_COMPANION__' } as const;
-type NationalIdKind = keyof typeof NATIONAL_ID_PREFIXES;
+const ID_PREFIXES = { patient: 'NATIONAL_ID_PATIENT__', companion: 'NATIONAL_ID_COMPANION__', passport: 'PASSPORT_PATIENT__' } as const;
+type NationalIdKind = keyof typeof ID_PREFIXES;
 
 const readFlag = (key: string) => {
   try { return localStorage.getItem(key) === '1'; } catch { return false; }
@@ -26,10 +26,12 @@ const NationalIdUploader: React.FC<{
   kind: NationalIdKind;
   label: string;
   hint: string;
+  documentName?: string;
+  required?: boolean;
   alreadyUploaded: boolean;
   onUploaded: () => void;
   onBusyChange: (busy: boolean) => void;
-}> = ({ leadId, kind, label, hint, alreadyUploaded, onUploaded, onBusyChange }) => {
+}> = ({ leadId, kind, label, hint, documentName = 'national ID', required = true, alreadyUploaded, onUploaded, onBusyChange }) => {
   const [items, setItems] = useState<UploadItem[]>([]);
   const [uploading, setUploading] = useState(false);
   const [message, setMessage] = useState('');
@@ -58,7 +60,7 @@ const NationalIdUploader: React.FC<{
     setItems(prev => prev.map(i => (i.key === key ? { ...i, ...patch } : i)));
 
   const submit = async () => {
-    if (!toUpload.length) return setMessage(`Choose the ${label.toLowerCase()} national ID first.`);
+    if (!toUpload.length) return setMessage(`Choose the ${label.toLowerCase()} ${documentName} first.`);
     setUploading(true);
     onBusyChange(true);
     setMessage('');
@@ -66,7 +68,7 @@ const NationalIdUploader: React.FC<{
     let failed = 0;
     for (const item of toUpload) {
       patchItem(item.key, { status: 'uploading', error: undefined });
-      const taggedFile = new File([item.file], `${NATIONAL_ID_PREFIXES[kind]}${item.file.name}`, {
+      const taggedFile = new File([item.file], `${ID_PREFIXES[kind]}${item.file.name}`, {
         type: item.file.type,
         lastModified: item.file.lastModified,
       });
@@ -90,12 +92,14 @@ const NationalIdUploader: React.FC<{
     <div className={`p-4 rounded-2xl border ${isUploaded ? 'border-emerald-200 bg-emerald-50/40' : 'border-slate-200 bg-white'}`}>
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
-          <p className="text-sm font-black text-slate-900">{label} national ID <span className="text-rose-500">*</span></p>
+          <p className="text-sm font-black text-slate-900">{label} {documentName}{required && <span className="text-rose-500"> *</span>}</p>
           <p className="text-xs text-slate-500 mt-0.5">{hint}</p>
         </div>
         {isUploaded
           ? <span className="shrink-0 px-2.5 py-1 rounded-lg bg-emerald-100 text-emerald-700 text-[10px] font-black uppercase tracking-widest">Uploaded</span>
-          : <span className="shrink-0 px-2.5 py-1 rounded-lg bg-rose-50 text-rose-600 text-[10px] font-black uppercase tracking-widest">Required</span>}
+          : required
+            ? <span className="shrink-0 px-2.5 py-1 rounded-lg bg-rose-50 text-rose-600 text-[10px] font-black uppercase tracking-widest">Required</span>
+            : <span className="shrink-0 px-2.5 py-1 rounded-lg bg-slate-100 text-slate-500 text-[10px] font-black uppercase tracking-widest">Optional</span>}
       </div>
 
       <input
@@ -114,7 +118,7 @@ const NationalIdUploader: React.FC<{
         className="mt-3 w-full border-2 border-dashed border-slate-200 hover:border-teal-400 rounded-xl p-4 text-center cursor-pointer transition-colors"
       >
         <IdCard className="mx-auto text-teal-600" size={20} />
-        <p className="text-xs font-bold text-slate-700 mt-1.5">{items.length || isUploaded ? 'Add another file (e.g. back side)' : `Choose the ${label.toLowerCase()} national ID`}</p>
+        <p className="text-xs font-bold text-slate-700 mt-1.5">{items.length || isUploaded ? 'Add another file (e.g. back side)' : `Choose the ${label.toLowerCase()} ${documentName}`}</p>
         <p className="text-[11px] text-slate-400 mt-0.5">PDF, JPG, JPEG or PNG. You can add front and back sides.</p>
       </div>
 
@@ -151,7 +155,7 @@ const NationalIdUploader: React.FC<{
         >
           {uploading
             ? <><Loader2 className="inline mr-2 animate-spin" size={14} /> Uploading...</>
-            : `Upload ${label.toLowerCase()} ID`}
+            : `Upload ${label.toLowerCase()} ${documentName}`}
         </button>
       )}
     </div>
@@ -168,6 +172,7 @@ const PatientDocumentUpload: React.FC<{ leadId: string }> = ({ leadId }) => {
   const stepKey = `documents_step_${leadId}`;
   const patientIdKey = `national_id_patient_${leadId}`;
   const companionIdKey = `national_id_companion_${leadId}`;
+  const passportKey = `passport_patient_${leadId}`;
   const [view, setView] = useState<'form' | 'national_id' | 'thanks' | 'recorded'>(() => {
     if (readFlag(storageKey)) return 'recorded';
     try {
@@ -178,6 +183,7 @@ const PatientDocumentUpload: React.FC<{ leadId: string }> = ({ leadId }) => {
   });
   const [patientIdUploaded, setPatientIdUploaded] = useState(() => readFlag(patientIdKey));
   const [companionIdUploaded, setCompanionIdUploaded] = useState(() => readFlag(companionIdKey));
+  const [passportUploaded, setPassportUploaded] = useState(() => readFlag(passportKey));
   const [idUploadBusy, setIdUploadBusy] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -318,9 +324,9 @@ const PatientDocumentUpload: React.FC<{ leadId: string }> = ({ leadId }) => {
         <section className="w-full max-w-xl bg-white rounded-[2rem] p-8 shadow-2xl">
           <div className="w-14 h-14 rounded-2xl bg-teal-100 text-teal-700 flex items-center justify-center mb-5"><IdCard size={28} /></div>
           <p className="text-[11px] font-black uppercase tracking-widest text-teal-700">Step 2 of 2</p>
-          <h1 className="text-2xl font-black text-slate-900 mt-1">Submit national ID</h1>
+          <h1 className="text-2xl font-black text-slate-900 mt-1">Submit ID & passport</h1>
           <p className="text-sm text-slate-500 mt-2">
-            Please upload a national ID card for the patient and for the companion. Both are required to complete your submission.
+            Please upload a national ID card for the patient and for the companion (both required), and the patient's passport personal particulars page (optional for now).
           </p>
 
           <div className="mt-6 space-y-4">
@@ -340,6 +346,17 @@ const PatientDocumentUpload: React.FC<{ leadId: string }> = ({ leadId }) => {
               hint="Government-issued national ID of the person travelling with the patient."
               alreadyUploaded={companionIdUploaded}
               onUploaded={() => { writeFlag(companionIdKey, '1'); setCompanionIdUploaded(true); }}
+              onBusyChange={setIdUploadBusy}
+            />
+            <NationalIdUploader
+              leadId={leadId}
+              kind="passport"
+              label="Patient"
+              documentName="passport"
+              required={false}
+              hint="Passport page with your personal particulars (name, date of birth, passport number)."
+              alreadyUploaded={passportUploaded}
+              onUploaded={() => { writeFlag(passportKey, '1'); setPassportUploaded(true); }}
               onBusyChange={setIdUploadBusy}
             />
           </div>

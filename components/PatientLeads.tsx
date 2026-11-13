@@ -13,6 +13,7 @@ import {
 import { toast } from 'sonner';
 import { generateCallSummary } from '../services/geminiService.ts';
 import LeadQuotationPanel from './LeadQuotationPanel';
+import { VIL_FILE_ITEMS, VIL_TEXT_ITEMS } from './VilPublicForm';
 
 class LeadDetailErrorBoundary extends React.Component<{ children: React.ReactNode; onClose: () => void }, { hasError: boolean }> {
   state = { hasError: false };
@@ -247,6 +248,8 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   const [aiSummaryDraft, setAiSummaryDraft] = useState('');
   const [isGeneratingCallSummary, setIsGeneratingCallSummary] = useState(false);
   const [isSendingDocumentRequest, setIsSendingDocumentRequest] = useState(false);
+  const [isSendingVilForm, setIsSendingVilForm] = useState(false);
+  const [vilSubmission, setVilSubmission] = useState<any>(null);
   const [showSpamReasonPicker, setShowSpamReasonPicker] = useState(false);
   const [spamReason, setSpamReason] = useState('');
   const SPAM_REASONS = ['Spam / Fake Enquiry', 'Invalid Contact Information', 'Test Entry', 'Not a Genuine Patient Interest', 'Duplicate of Existing Lead', 'Other'];
@@ -524,9 +527,9 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
       stage2: stage(2, 'Contact Attempted', 'Outreach', 'stage2_checklist', ['contact_attempt_count', 'contact_attempts', 'first_contact_at', 'last_attempt_at', 'call_outcome', 'response_outcome', 'call_notes', 'call_summary', 'ai_call_summary', 'callback_date', 'callback_due_at']),
       stage3: stage(3, 'Medical Documents', 'Documents', 'stage3_checklist', ['process_explained_at', 'document_request_sent_at', 'documents_received_count', 'document_request_whatsapp_message']),
       stage4: stage(4, 'In-House Doctor Interaction', 'Doctor Inbox', 'stage4_checklist', ['assigned_doctor_name', 'doctor_inbox_status', 'doctor_assigned_at', 'doctor_call_notes', 'doctor_call_at', 'personal_email_sent_at', 'initial_doctor_assessment', 'doctor_next_steps', 'doctor_interaction_complete', 'doctor_call_notes_saved_at', 'initial_doctor_assessment_saved_at']),
-      stage5: stage(5, 'Clinical Qualification & Planning', 'Clinical', 'stage5_checklist', ['suggested_hospital', 'suggested_hospital_id', 'suggested_surgeon', 'suggested_surgeon_id', 'suggested_procedures', 'illness_history', 'clinical_summary', 'clinical_recommendation_finalized', 'clinical_review_confirmed', 'clinical_review_confirmed_at', 'clinical_review_confirmed_by', 'clinical_decision', 'clinical_report_generated_at']),
+      stage5: stage(5, 'Clinical Qualification & Planning', 'Clinical', 'stage5_checklist', ['suggested_hospital', 'suggested_hospital_id', 'suggested_surgeon', 'suggested_surgeon_id', 'suggested_hospitals', 'suggested_surgeons', 'suggested_procedures', 'illness_history', 'clinical_summary', 'clinical_recommendation_finalized', 'clinical_review_confirmed', 'clinical_review_confirmed_at', 'clinical_review_confirmed_by', 'clinical_decision', 'clinical_report_generated_at']),
       stage6: stage(6, 'Financial & Logistics Proposal', 'BDM Pipeline', 'stage6_checklist', ['quotation_details', 'quotation_items', 'travel_accommodation', 'patient_concerns', 'financial_proposal_pdf', 'proposal_sent_at', 'patient_interest', 'patient_interest_reason', 'estimated_cost_min', 'estimated_cost_max', 'estimated_cost_currency', 'estimated_cost_notes', 'specialist_consultation_booked']),
-      stage7: stage(7, 'Specialist Consultation, Payment & Confirmation', 'Specialist Consult & Payment', 'stage7_checklist', ['specialist_call_completed_at', 'specialist_call_notes', 'mom_date_time', 'mom_participants', 'mom_discussion_points', 'mom_specialist_observations', 'mom_patient_questions', 'mom_decisions', 'mom_next_steps', 'mom_instructions', 'mom_recorded_at', 'mom_pdf_path', 'mom_pdf_url', 'bdm_call_completed_at', 'bdm_call_notes', 'quotation_agreement_confirmed', 'clinical_process_agreement_confirmed', 'stage7_patient_decision', 'stage7_disagreement_reason', 'stage7_disagreement_concern', 'stage7_disagreement_followup', 'request_to_proceed_confirmed', 'request_to_proceed_at', 'payment_link', 'payment_reference', 'payment_link_provided_at', 'payment_status', 'payment_date_time', 'payment_amount', 'advance_payment_verified']),
+      stage7: stage(7, 'Specialist Consultation, Payment & Confirmation', 'Specialist Consult & Payment', 'stage7_checklist', ['specialist_call_completed_at', 'specialist_call_notes', 'mom_date_time', 'mom_participants', 'mom_discussion_points', 'mom_specialist_observations', 'mom_patient_questions', 'mom_decisions', 'mom_next_steps', 'mom_instructions', 'mom_recorded_at', 'mom_pdf_path', 'mom_pdf_url', 'bdm_call_completed_at', 'bdm_call_notes', 'quotation_agreement_confirmed', 'clinical_process_agreement_confirmed', 'stage7_patient_decision', 'stage7_disagreement_reason', 'stage7_disagreement_concern', 'stage7_disagreement_followup', 'request_to_proceed_confirmed', 'request_to_proceed_at', 'payment_link', 'payment_reference', 'payment_link_provided_at', 'payment_status', 'payment_date_time', 'payment_amount', 'advance_payment_verified', 'vil_form_sent_at']),
       stage8: stage(8, 'Medical Case Handover', 'CDM/WaruBuddy Handover', 'stage8_checklist', ['medical_case_id', 'converted_at', 'handover_prepared_at', 'patient_user_id', 'patient_patient_id', 'patient_account_created_at', 'patient_account_status', 'patient_account_error', 'patient_invitation_sent_at', 'handover_bdm_name', 'handover_cdm_team', 'handover_status', 'handover_case_information', 'clinical_information_shared', 'financial_information_shared', 'specialist_mom_information_shared', 'handover_initiated_at', 'handover_accepted_at', 'case_ownership_confirmed_at', 'stage8_completed_at']),
       stage9: stage(9, 'Lost / Dropped', 'Archived', 'stage9_checklist', ['dropoff_reason', 'archived_at', 'dropped_from_stage', 'dropped_at', 'resume_stage']),
     };
@@ -871,6 +874,10 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   };
 
   const handleGenerateStage7PaymentLink = async () => {
+    if (!vilSubmission) {
+      toast.error('The patient must submit the VIL medical visa form before the advance payment link is generated.');
+      return;
+    }
     if (!selectedLead) return;
     const link = `https://waruwenjo.com/pay/${selectedLead.id}?ref=advance`;
     const reference = `WJO-PAY-${Math.floor(Math.random() * 100000)}`;
@@ -1284,6 +1291,63 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
     toast.success(`Patient interest recorded: ${interest}`);
   };
 
+  const loadVilSubmission = async (leadId: string) => {
+    const { data } = await supabase.from('vil_form_submissions').select('*').eq('lead_id', leadId).maybeSingle();
+    setVilSubmission(data || null);
+  };
+
+  useEffect(() => {
+    if (selectedLead?.id) loadVilSubmission(selectedLead.id);
+    else setVilSubmission(null);
+  }, [selectedLead?.id]);
+
+  const handleSendVilForm = async () => {
+    if (isSendingVilForm) return;
+    if (!selectedLead?.email) {
+      toast.error('No patient email is saved for this lead.');
+      return;
+    }
+    setIsSendingVilForm(true);
+    const formLink = `${window.location.origin}${window.location.pathname}#/vil-form/${selectedLead.id}`;
+    const docList = ['Recent colour photograph (2 in × 2 in, JPEG, 10 KB – 1 MB)', 'Medical invitation letter from the Indian hospital', 'Proof of residence', 'Proof of occupation', 'Polio and Yellow Fever vaccination certificate'];
+    const rowStyle = 'padding:8px 0;border-bottom:1px solid #eef2f7;font-size:14px;color:#334155;';
+    const html = `<div style="font-family:Arial,Helvetica,sans-serif;background:#f8fafc;padding:24px;">
+      <div style="max-width:600px;margin:0 auto;background:#ffffff;border-radius:16px;overflow:hidden;border:1px solid #e2e8f0;">
+        <div style="background:#4338ca;padding:24px 28px;color:#ffffff;">
+          <div style="font-size:11px;letter-spacing:2px;text-transform:uppercase;opacity:0.8;">WaruWenJo Medical Tourism</div>
+          <div style="font-size:20px;font-weight:bold;margin-top:6px;">VIL Medical Visa Form</div>
+        </div>
+        <div style="padding:28px;color:#334155;font-size:14px;line-height:1.6;">
+          <p style="margin:0 0 14px;">Dear ${selectedLead.name || 'Patient'},</p>
+          <p style="margin:0 0 14px;">To continue with your medical visa (VIL) application, please complete the form and upload your documents using the secure link below. It takes about 10 minutes.</p>
+          <div style="text-align:center;margin:26px 0;">
+            <a href="${formLink}" style="display:inline-block;background:#4338ca;color:#ffffff;text-decoration:none;font-weight:bold;font-size:14px;padding:14px 28px;border-radius:12px;">Complete the VIL Form</a>
+          </div>
+          <p style="margin:0 0 8px;font-weight:bold;color:#0f172a;">Documents you will need</p>
+          <div style="margin:0 0 18px;">${docList.map(d => `<div style="${rowStyle}">&#10003;&nbsp; ${d}</div>`).join('')}</div>
+          <p style="margin:0 0 14px;background:#eef2ff;border-radius:10px;padding:12px 14px;font-size:13px;color:#3730a3;"><strong>Photo tip:</strong> Use a plain white or light background, face the camera directly, and do not crop your passport photo. Upload a separate photograph.</p>
+          <p style="margin:0 0 14px;font-size:13px;color:#64748b;">If the button does not work, copy and paste this link into your browser:<br/><span style="word-break:break-all;">${formLink}</span></p>
+          <p style="margin:24px 0 0;">Warm regards,<br/><strong>WaruWenJo Medical Tourism Team</strong></p>
+        </div>
+      </div>
+    </div>`;
+    try {
+      const result = await sendCrmEmail(selectedLead.email, 'Complete your VIL medical visa form', html, selectedLead.name);
+      if (!result.success) {
+        toast.error(result.error || 'VIL form email failed');
+        return;
+      }
+      await persistWorkflowPatch({ vil_form_sent_at: new Date().toISOString() });
+      await logAdminActivity('VIL Form Email Sent', 'Patient Lead', selectedLead.id, { email: selectedLead.email, form_link: formLink });
+      loadActivityLogs(selectedLead.id);
+      toast.success('VIL form email sent to patient');
+    } catch (error: any) {
+      toast.error(error?.message || 'VIL form email failed');
+    } finally {
+      setIsSendingVilForm(false);
+    }
+  };
+
   const handleSendDocumentRequest = async () => {
     if (isSendingDocumentRequest) return;
     if (!selectedLead?.email) {
@@ -1292,8 +1356,8 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
     }
     setIsSendingDocumentRequest(true);
     const uploadLink = `${window.location.origin}${window.location.pathname}#/patient-documents/${selectedLead.id}`;
-    const requested = ['Medical reports', 'Test results', 'X-rays', 'MRI / CT scans', 'Prescriptions', 'Previous treatment records', 'Other relevant medical documents'];
-    const html = `<p>Dear ${selectedLead.name},</p><p>Please upload the medical documents needed for your ${selectedLead.treatmentInterest || 'medical enquiry'} review.</p><ul>${requested.map(item => `<li>${item}</li>`).join('')}</ul><p><a href="${uploadLink}" style="display:inline-block;padding:12px 18px;background:#0d7a6e;color:#fff;border-radius:8px;text-decoration:none">Upload medical documents</a></p><p>This secure link is associated with your enquiry. You may upload multiple files.</p><p>Regards,<br/>WaruWenJo Medical Tourism</p>`;
+    const requested = ['Passport – personal particulars page', 'National ID card (patient and companion)', 'Medical reports', 'Test results', 'X-rays', 'MRI / CT scans', 'Prescriptions', 'Previous treatment records', 'Other relevant medical documents'];
+    const html = `<p>Dear ${selectedLead.name},</p><p>Please upload the documents needed for your ${selectedLead.treatmentInterest || 'medical enquiry'} review, including your passport and national ID.</p><ul>${requested.map(item => `<li>${item}</li>`).join('')}</ul><p><a href="${uploadLink}" style="display:inline-block;padding:12px 18px;background:#0d7a6e;color:#fff;border-radius:8px;text-decoration:none">Upload medical documents</a></p><p>This secure link is associated with your enquiry. You may upload multiple files.</p><p>Regards,<br/>WaruWenJo Medical Tourism</p>`;
     try {
       const result = await sendCrmEmail(selectedLead.email, 'Medical documents required for your enquiry', html, selectedLead.name);
       if (!result.success) {
@@ -1455,6 +1519,43 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   const handleUpdateSummary = async (field: string, value: any) => {
      if (!selectedLead || !localWorkflowState) return;
      await persistWorkflowPatch({ [field]: value });
+  };
+
+  // Stage 5: several hospitals and surgeons can be recommended. The first item is the primary
+  // choice and keeps the single suggested_* fields in sync, so the later steps keep working.
+  const getSuggestions = (kind: 'hospital' | 'surgeon'): Array<{ id: string; name: string }> => {
+    const state: any = localWorkflowState || {};
+    const list = kind === 'hospital' ? state.suggested_hospitals : state.suggested_surgeons;
+    if (Array.isArray(list)) return list;
+    // Records saved before multi-select only have the single fields
+    const name = kind === 'hospital' ? state.suggested_hospital : state.suggested_surgeon;
+    const id = kind === 'hospital' ? state.suggested_hospital_id : state.suggested_surgeon_id;
+    return name ? [{ id: id || '', name }] : [];
+  };
+  const hospitalSuggestions = getSuggestions('hospital');
+  const surgeonSuggestions = getSuggestions('surgeon');
+
+  const saveSuggestions = async (kind: 'hospital' | 'surgeon', items: Array<{ id: string; name: string }>) => {
+    const primary = items[0];
+    const patch = kind === 'hospital'
+      ? { suggested_hospitals: items, suggested_hospital: primary?.name || '', suggested_hospital_id: primary?.id || '' }
+      : { suggested_surgeons: items, suggested_surgeon: primary?.name || '', suggested_surgeon_id: primary?.id || '' };
+    const otherSelected = kind === 'hospital' ? surgeonSuggestions.length > 0 : hospitalSuggestions.length > 0;
+    const { error } = await persistWorkflowPatch(patch);
+    if (error) toast.error('Stage 5 recommendations could not be synced');
+    if (otherSelected && primary) {
+      await saveStage5Task('Suggest Hospitals & Surgeons/Specialists', patch);
+    }
+  };
+
+  const addSuggestion = (kind: 'hospital' | 'surgeon', item: { id: string; name: string }) => {
+    const current = getSuggestions(kind);
+    if (current.some((s) => s.name === item.name)) return;
+    saveSuggestions(kind, [...current, item]);
+  };
+
+  const removeSuggestion = (kind: 'hospital' | 'surgeon', index: number) => {
+    saveSuggestions(kind, getSuggestions(kind).filter((_, i) => i !== index));
   };
 
   const addQuotationItem = () => {
@@ -3204,27 +3305,55 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                        {activeWorkflowStage === 5 && (
                           <div className="space-y-4">
                              <div className="grid grid-cols-2 gap-4">
-                                <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100">
-                                   <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest pl-1">Selected Hospital</label>
-                                   <select 
-                                      className="w-full mt-1 p-2 bg-slate-50 border-none rounded-lg text-sm font-bold text-slate-700 outline-none focus:ring-2 focus:ring-teal-500/20"
-                                      value={localWorkflowState?.suggested_hospital_id || hospitals.find(h => h.name === localWorkflowState?.suggested_hospital)?.id || ""}
-                                      onChange={(e) => { const hospitalId = e.target.value; const hospital = hospitals.find(h => h.id === hospitalId); handleUpdateSummary('suggested_hospital', hospital?.name || ''); handleUpdateSummary('suggested_hospital_id', hospitalId); if (hospitalId && localWorkflowState?.suggested_surgeon) saveStage5Task('Suggest Hospitals & Surgeons/Specialists', { suggested_hospital: hospital?.name || '', suggested_hospital_id: hospitalId }); }}
-                                    >
-                                      <option value="">Select Hospital...</option>
-                                      {hospitals.map(h => <option key={h.id} value={h.id}>{h.name}</option>)}
-                                    </select>
+                                <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100 space-y-3">
+                                   <div className="flex items-center justify-between pl-1">
+                                     <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Recommended Hospitals</label>
+                                     <span className="text-[9px] font-bold text-slate-400">{hospitalSuggestions.length} selected</span>
+                                   </div>
+                                   <div className="flex flex-wrap gap-2 min-h-[28px]">
+                                     {hospitalSuggestions.map((item, i) => (
+                                       <span key={`${item.name}-${i}`} className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-xs font-bold text-slate-700">
+                                         {i === 0 && <span className="text-[8px] font-black text-teal-600 uppercase tracking-widest">Primary</span>}
+                                         {item.name}
+                                         <button type="button" onClick={() => removeSuggestion('hospital', i)} className="text-slate-400 hover:text-rose-600 text-sm leading-none" aria-label={`Remove ${item.name}`}>×</button>
+                                       </span>
+                                     ))}
+                                   </div>
+                                   <select
+                                      className="w-full p-2 bg-white border border-slate-100 rounded-lg text-sm font-bold text-slate-700 outline-none focus:ring-2 focus:ring-teal-500/20"
+                                      value=""
+                                      onChange={(e) => { const h = hospitals.find(x => x.id === e.target.value); if (h) addSuggestion('hospital', { id: h.id, name: h.name }); }}
+                                   >
+                                      <option value="">+ Add hospital...</option>
+                                      {hospitals
+                                        .filter(h => !hospitalSuggestions.some(s => s.name === h.name))
+                                        .map(h => <option key={h.id} value={h.id}>{h.name}</option>)}
+                                   </select>
                                 </div>
-                                <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100">
-                                   <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest pl-1">Assigned Surgeon</label>
-                                   <select 
-                                      className="w-full mt-1 p-2 bg-slate-50 border-none rounded-lg text-sm font-bold text-slate-700 outline-none focus:ring-2 focus:ring-teal-500/20"
-                                      value={localWorkflowState?.suggested_surgeon_id || doctors.find(d => d.name === localWorkflowState?.suggested_surgeon)?.id || ""}
-                                      onChange={(e) => { const surgeonId = e.target.value; const surgeon = doctors.find(d => d.id === surgeonId); handleUpdateSummary('suggested_surgeon', surgeon?.name || ''); handleUpdateSummary('suggested_surgeon_id', surgeonId); if (surgeonId && localWorkflowState?.suggested_hospital) saveStage5Task('Suggest Hospitals & Surgeons/Specialists', { suggested_surgeon: surgeon?.name || '', suggested_surgeon_id: surgeonId }); }}
-                                    >
-                                      <option value="">Select Surgeon...</option>
-                                      {doctors.map(d => <option key={d.id} value={d.id}>{d.name} ({d.specialty})</option>)}
-                                    </select>
+                                <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100 space-y-3">
+                                   <div className="flex items-center justify-between pl-1">
+                                     <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Recommended Surgeons</label>
+                                     <span className="text-[9px] font-bold text-slate-400">{surgeonSuggestions.length} selected</span>
+                                   </div>
+                                   <div className="flex flex-wrap gap-2 min-h-[28px]">
+                                     {surgeonSuggestions.map((item, i) => (
+                                       <span key={`${item.name}-${i}`} className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-xs font-bold text-slate-700">
+                                         {i === 0 && <span className="text-[8px] font-black text-teal-600 uppercase tracking-widest">Primary</span>}
+                                         {item.name}
+                                         <button type="button" onClick={() => removeSuggestion('surgeon', i)} className="text-slate-400 hover:text-rose-600 text-sm leading-none" aria-label={`Remove ${item.name}`}>×</button>
+                                       </span>
+                                     ))}
+                                   </div>
+                                   <select
+                                      className="w-full p-2 bg-white border border-slate-100 rounded-lg text-sm font-bold text-slate-700 outline-none focus:ring-2 focus:ring-teal-500/20"
+                                      value=""
+                                      onChange={(e) => { const d = doctors.find(x => x.id === e.target.value); if (d) addSuggestion('surgeon', { id: d.id, name: d.name }); }}
+                                   >
+                                      <option value="">+ Add surgeon...</option>
+                                      {doctors
+                                        .filter(d => !surgeonSuggestions.some(s => s.name === d.name))
+                                        .map(d => <option key={d.id} value={d.id}>{d.name} ({d.specialty})</option>)}
+                                   </select>
                                 </div>
                              </div>
 
@@ -3266,7 +3395,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                                     <p className="text-[10px] font-black text-teal-700 uppercase tracking-widest">Clinical Selection Summary</p>
                                   </div>
                                   <p className="text-xs font-bold text-slate-700 leading-relaxed">
-                                    Clinical review complete. <span className="text-teal-600">Dr. {localWorkflowState.suggested_surgeon}</span> and <span className="text-teal-600">{localWorkflowState.suggested_hospital}</span> have been officially suggested for this case.
+                                    Clinical review complete. Suggested surgeon(s): <span className="text-teal-600">{surgeonSuggestions.map(d => d.name).join(', ')}</span>. Suggested hospital(s): <span className="text-teal-600">{hospitalSuggestions.map(h => h.name).join(', ')}</span>.
                                   </p>
                                 </div>
                               )}
@@ -3430,6 +3559,43 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                                 {localWorkflowState?.stage7_patient_decision === 'Disagreed' && <div className="grid grid-cols-1 md:grid-cols-3 gap-3"><textarea value={localWorkflowState?.stage7_disagreement_reason || ''} onChange={(e) => handleUpdateSummary('stage7_disagreement_reason', e.target.value)} placeholder="Reason" className="p-3 bg-rose-50 border border-rose-100 rounded-xl text-xs min-h-[70px]" /><textarea value={localWorkflowState?.stage7_disagreement_concern || ''} onChange={(e) => handleUpdateSummary('stage7_disagreement_concern', e.target.value)} placeholder="Patient concern" className="p-3 bg-rose-50 border border-rose-100 rounded-xl text-xs min-h-[70px]" /><textarea value={localWorkflowState?.stage7_disagreement_followup || ''} onChange={(e) => handleUpdateSummary('stage7_disagreement_followup', e.target.value)} placeholder="Required follow-up" className="p-3 bg-rose-50 border border-rose-100 rounded-xl text-xs min-h-[70px]" /></div>}
                              </div>
                              <button onClick={handleRequestPatientToProceed} className={`w-full p-4 rounded-2xl font-black text-[10px] uppercase tracking-widest ${localWorkflowState?.request_to_proceed_confirmed ? 'bg-teal-600 text-white' : 'bg-teal-50 text-teal-700 border border-teal-100'}`}>{localWorkflowState?.request_to_proceed_confirmed ? '✓ Patient Requested to Proceed' : 'Request Patient to Proceed'}</button>
+                             <div className="p-5 bg-indigo-50/70 border border-indigo-100 rounded-3xl space-y-3">
+                                <p className="text-[9px] font-black text-indigo-700 uppercase tracking-widest">Step 4b — VIL Medical Visa Form</p>
+                                <p className="text-xs text-slate-600">The patient receives the VIL form by email. Their answers and documents are saved here automatically when they submit.</p>
+                                <div className="flex items-center justify-between gap-3 flex-wrap">
+                                  <p className="text-[10px] font-bold text-slate-500">{localWorkflowState?.vil_form_sent_at ? `Sent ${new Date(localWorkflowState.vil_form_sent_at).toLocaleString()}` : 'Not sent yet'}</p>
+                                  <button onClick={handleSendVilForm} disabled={isSendingVilForm || !canWriteStage(7) || isViewOnlyStage} className="p-3 bg-indigo-600 text-white rounded-xl font-black text-[10px] uppercase tracking-widest disabled:opacity-50">{isSendingVilForm ? 'Sending…' : localWorkflowState?.vil_form_sent_at ? 'Resend VIL Form' : 'Send VIL Form to Patient'}</button>
+                                </div>
+                                <div className={`p-4 rounded-xl border ${vilSubmission ? 'bg-teal-50 border-teal-100' : 'bg-white border-slate-100'}`}>
+                                  <div className="flex items-center justify-between gap-3">
+                                    <p className={`text-[10px] font-black uppercase tracking-widest ${vilSubmission ? 'text-teal-700' : 'text-slate-400'}`}>{vilSubmission ? `✓ Submitted ${new Date(vilSubmission.submitted_at).toLocaleString()}` : 'Awaiting patient submission'}</p>
+                                    <button onClick={() => selectedLead?.id && loadVilSubmission(selectedLead.id)} className="text-[9px] font-black text-indigo-700 uppercase tracking-widest">Refresh status</button>
+                                  </div>
+                                  {vilSubmission && (
+                                    <div className="mt-4 space-y-3">
+                                      <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                                        {VIL_TEXT_ITEMS.map((item) => (
+                                          <div key={item.key} className="p-2 bg-white rounded-lg">
+                                            <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">{item.label}</p>
+                                            <p className="text-xs text-slate-700 whitespace-pre-wrap">{vilSubmission.form?.[item.key] || '—'}</p>
+                                          </div>
+                                        ))}
+                                      </div>
+                                      <div className="space-y-1">
+                                        {VIL_FILE_ITEMS.map((item) => {
+                                          const doc = (vilSubmission.documents || []).find((d: any) => d.field === item.key);
+                                          return (
+                                            <div key={item.key} className="flex items-center justify-between gap-3 p-2 bg-white rounded-lg">
+                                              <p className="text-xs text-slate-700">{item.label}</p>
+                                              {doc ? <a href={doc.file_url} target="_blank" rel="noreferrer" className="text-[10px] font-bold text-indigo-600 underline truncate max-w-[200px]">{doc.file_name}</a> : <span className="text-[10px] text-rose-600 font-bold">Missing</span>}
+                                            </div>
+                                          );
+                                        })}
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
+                             </div>
                              <div className="p-5 bg-amber-50 border border-amber-100 rounded-3xl space-y-3"><p className="text-[9px] font-black text-amber-700 uppercase tracking-widest">Step 5 — Payment Link & Advance Payment</p><button onClick={handleGenerateStage7PaymentLink} className="w-full p-3 bg-indigo-600 text-white rounded-xl font-black text-[10px] uppercase tracking-widest">{localWorkflowState?.payment_reference ? '✓ Payment Link Generated' : 'Generate Payment Link'}</button><input value={localWorkflowState?.payment_link || ''} onChange={(e) => handleUpdateSummary('payment_link', e.target.value)} placeholder="https://payment.example.com/..." className="w-full p-3 bg-white border border-amber-100 rounded-xl text-xs font-bold" /><button onClick={() => handleProvidePaymentLink(localWorkflowState?.payment_link || '')} className="w-full p-3 bg-amber-600 text-white rounded-xl font-black text-[10px] uppercase tracking-widest">{localWorkflowState?.payment_link_provided_at ? '✓ Payment Link Provided' : 'Provide Payment Link'}</button><div className="grid grid-cols-2 gap-3"><input type="text" value={localWorkflowState?.payment_status || ''} onChange={(e) => handleUpdateSummary('payment_status', e.target.value)} placeholder="Payment status" className="p-3 bg-white border border-amber-100 rounded-xl text-xs" /><input type="number" value={localWorkflowState?.payment_amount ?? ''} onChange={(e) => handleUpdateSummary('payment_amount', e.target.value ? Number(e.target.value) : null)} placeholder="Amount" className="p-3 bg-white border border-amber-100 rounded-xl text-xs" /></div><button onClick={handleVerifyStage7AdvancePayment} className={`w-full p-3 rounded-xl font-black text-[10px] uppercase tracking-widest ${localWorkflowState?.advance_payment_verified ? 'bg-teal-600 text-white' : 'bg-white text-teal-700 border border-teal-100'}`}>{localWorkflowState?.advance_payment_verified ? '✓ Advance Payment Verified' : 'Verify Advance Payment'}</button></div>
                              <button onClick={() => { if (validateStage(7)) handleStageJump(8); else toast.error('Complete all Stage 7 checklist items first.'); }} className={`w-full p-5 rounded-[1.5rem] font-black text-xs uppercase tracking-widest flex items-center justify-center gap-3 shadow-xl ${validateStage(7) ? 'bg-indigo-600 text-white hover:bg-indigo-700' : 'bg-slate-200 text-slate-400 cursor-not-allowed opacity-60'}`}><ChevronRight size={18} /> {validateStage(7) ? 'Proceed to Stage 8' : 'Complete Stage 7 Checklist to Proceed'}</button>
                            </div>
