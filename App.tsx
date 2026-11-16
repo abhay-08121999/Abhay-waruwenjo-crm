@@ -25,6 +25,7 @@ import AgreementModule from './components/AgreementModule.tsx';
 import PatientLeads from './components/PatientLeads.tsx';
 import PatientDocumentUpload from './components/PatientDocumentUpload.tsx';
 import VilPublicForm from './components/VilPublicForm.tsx';
+import QuotationChoicePage from './components/QuotationChoicePage';
 import Hospitals from './components/Hospitals.tsx';
 import Doctors from './components/Doctors.tsx';
 import AdminLogin from './components/AdminLogin.tsx';
@@ -198,6 +199,14 @@ const App: React.FC = () => {
   const handleBackToLogin = () => {
     window.location.hash = '#/';
   };
+
+  // Public quotation choice page: opened from the options email, no login.
+  // Checked BEFORE the auth gate so patients never see the CRM loading screen.
+  const quotationChoiceMatch = currentHash.match(/^#\/quotation-choice\/([^/?]+)/);
+  if (quotationChoiceMatch) {
+    const chooseId = new URLSearchParams(currentHash.split('?')[1] || '').get('choose');
+    return <QuotationChoicePage token={decodeURIComponent(quotationChoiceMatch[1])} initialChoice={chooseId} />;
+  }
 
   // Show loading while checking auth
   if (isCheckingAuth) {

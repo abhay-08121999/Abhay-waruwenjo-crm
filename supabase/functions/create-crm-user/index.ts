@@ -977,6 +977,128 @@ const deleteRole = async (
   });
 };
 
+const findExistingUserIdByEmail = async (
+  serviceClient: ReturnType<typeof createClient>,
+  email: string,
+): Promise<string | null> => {
+  const { data: profile } = await serviceClient
+    .from('crm_user_profiles')
+    .select('user_id')
+    .ilike('email', email)
+    .maybeSingle();
+  if (profile?.user_id) return profile.user_id;
+
+  // Fall back to the Auth user list (covers accounts with no CRM profile row)
+  for (let page = 1; page <= 50; page++) {
+    const { data, error } = await serviceClient.auth.admin.listUsers({ page, perPage: 1000 });
+    if (error) throw new Error(`Unable to look up existing accounts: ${error.message}`);
+    const users = data?.users || [];
+    const match = users.find((u: any) => (u.email || '').toLowerCase() === email.toLowerCase());
+    if (match) return match.id;
+    if (users.length < 1000) break;
+  }
+  return null;
+};
+
+const attachRoleToExistingAccount = async (
+  serviceClient: ReturnType<typeof createClient>,
+  userId: string,
+  role: { id: string; role_key: string; name: string },
+  details: { username: string; fullName: string; email: string },
+) => {
+  // Never touch a leadership account from this flow
+  const { data: currentAssignments, error: currentError } =
+    await serviceClient
+      .from('crm_user_role_assignments')
+      .select('crm_roles!inner (role_key)')
+      .eq('user_id', userId);
+
+  if (currentError) {
+    return jsonResponse({ error: `Unable to check existing roles: ${currentError.message}` }, 500);
+  }
+  if ((currentAssignments || []).some((a: any) => a.crm_roles?.role_key === 'super_admin')) {
+    return jsonResponse({ error: 'This account is a Super Admin and cannot be changed here.' }, 403);
+  }
+
+  const { data: duplicateUsername } = await serviceClient
+    .from('crm_user_profiles')
+    .select('user_id')
+    .eq('username', details.username)
+    .neq('user_id', userId)
+    .maybeSingle();
+  if (duplicateUsername) {
+    return jsonResponse({ error: 'That username is already in use.' }, 409);
+  }
+
+  // Re-activate the account if it was deactivated before. The password is NOT changed.
+  const { error: unbanError } = await serviceClient.auth.admin.updateUserById(userId, {
+    ban_duration: 'none',
+  });
+  if (unbanError) {
+    return jsonResponse({ error: `Unable to reactivate existing account: ${unbanError.message}` }, 500);
+  }
+
+  const { error: profileError } = await serviceClient
+    .from('crm_user_profiles')
+    .upsert(
+      {
+        user_id: userId,
+        email: details.email,
+        username: details.username,
+        full_name: details.fullName,
+        is_active: true,
+        job_title: role.name,
+      },
+      { onConflict: 'user_id' },
+    );
+  if (profileError) {
+    return jsonResponse({ error: `Unable to update CRM profile: ${profileError.message}` }, 500);
+  }
+
+  const { error: clearError } = await serviceClient
+    .from('crm_user_role_assignments')
+    .delete()
+    .eq('user_id', userId);
+  if (clearError) {
+    return jsonResponse({ error: `Unable to remove previous role: ${clearError.message}` }, 500);
+  }
+
+  const { error: assignmentError } = await serviceClient
+    .from('crm_user_role_assignments')
+    .insert({ user_id: userId, role_id: role.id });
+  if (assignmentError) {
+    return jsonResponse({ error: `Unable to assign CRM role: ${assignmentError.message}` }, 500);
+  }
+
+  if (standardRoles.includes(role.role_key)) {
+    // Only replace the CRM-managed legacy roles; leave any other roles on the account alone
+    const { error: clearLegacyError } = await serviceClient
+      .from('user_roles')
+      .delete()
+      .eq('user_id', userId)
+      .in('role', [...standardRoles, 'unassigned']);
+    if (clearLegacyError) {
+      return jsonResponse({ error: `Unable to clear legacy roles: ${clearLegacyError.message}` }, 500);
+    }
+
+    const { error: legacyError } = await serviceClient
+      .from('user_roles')
+      .insert({ user_id: userId, role: role.role_key });
+    if (legacyError) {
+      return jsonResponse({ error: `Unable to synchronize CRM role: ${legacyError.message}` }, 500);
+    }
+  }
+
+  return jsonResponse({
+    success: true,
+    user_id: userId,
+    role,
+    existing_account: true,
+    message:
+      'This email already had an account, so the CRM role was attached to it. The password entered was not changed; the user should sign in with their existing password or use Forgot password.',
+  });
+};
+
 const createUser = async (
   serviceClient: ReturnType<typeof createClient>,
   payload: Record<string, unknown>,
@@ -1074,6 +1196,26 @@ const createUser = async (
     );
   }
 
+  // If this email already has an account, attach the CRM role to it instead of failing
+  let existingUserId: string | null = null;
+  try {
+    existingUserId = await findExistingUserIdByEmail(serviceClient, email);
+  } catch (lookupErr) {
+    return jsonResponse(
+      { error: lookupErr instanceof Error ? lookupErr.message : 'Unable to check existing accounts.' },
+      500,
+    );
+  }
+
+  if (existingUserId) {
+    return await attachRoleToExistingAccount(
+      serviceClient,
+      existingUserId,
+      role,
+      { username, fullName, email },
+    );
+  }
+
   const { data: duplicateUsername } =
     await serviceClient
       .from('crm_user_profiles')
@@ -1105,7 +1247,19 @@ const createUser = async (
       },
     });
 
-  if (authError || !authUser.user) {
+  if (authError || !authUser?.user) {
+    // Last safety net: the account exists but was not found above
+    if (/already (been )?registered|already exists/i.test(authError?.message || '')) {
+      const existingId = await findExistingUserIdByEmail(serviceClient, email);
+      if (existingId) {
+        return await attachRoleToExistingAccount(
+          serviceClient,
+          existingId,
+          role,
+          { username, fullName, email },
+        );
+      }
+    }
     return jsonResponse(
       {
         error:

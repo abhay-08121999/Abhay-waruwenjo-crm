@@ -1,4 +1,3 @@
-
 export enum LeadStatus {
   NEW = 'new',
   CONTACTED = 'contacted',
@@ -296,6 +295,10 @@ export interface Lead {
   metadata?: any;
   workflowStage?: number;
   workflowState?: any;
+  quotationChoice?: any; // patient_enquiries.quotation_choice { token, sent_at, expires_at, options[] }
+  selectedQuotationNo?: number | null; // patient_enquiries.selected_quotation_no (1, 2, ...)
+  selectedQuotationAt?: string | null; // patient_enquiries.selected_quotation_at
+  assignedBdmId?: string | null; // patient_enquiries.assigned_bdm_id (BDM who owns this lead)
 }
 
 export interface MedicalCase {

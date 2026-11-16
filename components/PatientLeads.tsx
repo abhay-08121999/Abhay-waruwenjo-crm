@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { getLeadCode } from '../lib/leadCode.ts';
-import { fetchLeads, createLead, updateLeadStatus, updatePatientEnquiry, convertProfileToCase, createConsultationFromEnquiry, fetchActiveDoctors, fetchDoctors, fetchHospitals, updateLeadWorkflow, saveLeadWorkflowState, logAdminActivity, fetchAdminActivityLogs, sendCrmEmail, fetchEnquiryDocuments, createPatientAccountFromEnquiry, uploadEnquiryDocument } from '../services/supabase.ts';
+import { fetchLeads, createLead, updateLeadStatus, updatePatientEnquiry, convertProfileToCase, createConsultationFromEnquiry, fetchActiveDoctors, fetchDoctors, fetchHospitals, updateLeadWorkflow, saveLeadWorkflowState, logAdminActivity, fetchAdminActivityLogs, sendCrmEmail, fetchEnquiryDocuments, createPatientAccountFromEnquiry, uploadEnquiryDocument, fetchCrmUsersByRole } from '../services/supabase.ts';
 import { supabase } from '../integrations/supabase/client';
 import { fetchInHouseDoctorUsers, InHouseDoctorUser, CrmRole, getCustomStageAccess } from '../services/roles';
 import { LeadStatus, Lead, Doctor, Hospital } from '../types.ts';
@@ -249,6 +249,10 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   const [isGeneratingCallSummary, setIsGeneratingCallSummary] = useState(false);
   const [isSendingDocumentRequest, setIsSendingDocumentRequest] = useState(false);
   const [isSendingVilForm, setIsSendingVilForm] = useState(false);
+  const [isUploadingVisa, setIsUploadingVisa] = useState(false);
+  const [bdmUsers, setBdmUsers] = useState<any[]>([]);
+  const roleKeys: string[] = (roles as any[]).map((r) => (typeof r === 'string' ? r : r?.key));
+  const canAssignBdm = roleKeys.includes('admin') || roleKeys.includes('super_admin');
   const [vilSubmission, setVilSubmission] = useState<any>(null);
   const [vilLoadError, setVilLoadError] = useState('');
   const [showSpamReasonPicker, setShowSpamReasonPicker] = useState(false);
@@ -264,8 +268,8 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
     { id: 4, name: 'In-House Doctor Interaction', label: 'Doctor Inbox', tasks: ['Record Doctor Call Notes', 'Send Personal Email to Patient', 'Complete In-House Doctor Interaction'], statusMapping: LeadStatus.CONTACTED },
     { id: 5, name: 'Clinical Qualification & Planning', label: 'Clinical', tasks: ['Suggest Hospitals & Surgeons/Specialists', 'Finalize Clinical Recommendation & Confirm Clinical Review', 'Generate Clinical Report'], statusMapping: LeadStatus.QUALIFIED },
     { id: 6, name: 'Financial & Logistics Proposal', label: 'BDM Pipeline', tasks: ['Generate Financial Proposal', 'Discuss Travel & Accommodation', 'Address Patient Concerns', 'Generate Proposal PDF', 'Send Proposal Via Mail', 'Confirm Patient Interest Via Call'], statusMapping: LeadStatus.QUALIFIED },
-    { id: 7, name: 'Specialist Consultation, Payment & Confirmation', label: 'Specialist Consult & Payment', tasks: ['Specialist Doctor Call', 'Record MOM', 'BDM Calls Patient', 'Confirm Quotation Agreement', 'Confirm Clinical Process Agreement', 'Record Patient Decision', 'Request Patient to Proceed', 'Generate Payment Link', 'Provide Payment Link', 'Verify Advance Payment'], statusMapping: LeadStatus.QUALIFIED },
-    { id: 8, name: 'Medical Case Handover', label: 'CDM/WaruBuddy Handover', tasks: ['Convert Lead to Medical Case', 'Prepare Complete Patient Handover', 'Create Patient Account', 'Handover Patient from BDM to CDM/WaruBuddy', 'CDM/WaruBuddy Accepts Handover', 'Confirm Case Ownership', 'Complete Stage 8'], statusMapping: LeadStatus.WON },
+    { id: 7, name: 'Specialist Consultation, Payment & Confirmation', label: 'Specialist Consult & Payment', tasks: ['Specialist Doctor Call', 'Record MOM', 'BDM Calls Patient', 'Confirm Quotation Agreement', 'Confirm Clinical Process Agreement', 'Record Patient Decision', 'Request Patient to Proceed'], statusMapping: LeadStatus.QUALIFIED },
+    { id: 8, name: 'Medical Case Handover', label: 'CDM/WaruBuddy Handover', tasks: ['Generate Payment Link', 'Provide Payment Link', 'Verify Advance Payment', 'Convert Lead to Medical Case', 'Prepare Complete Patient Handover', 'Create Patient Account', 'Handover Patient from BDM to CDM/WaruBuddy', 'CDM/WaruBuddy Accepts Handover', 'Confirm Case Ownership', 'Complete Stage 8'], statusMapping: LeadStatus.WON },
     { id: 9, name: 'Lost / Dropped', label: 'Archived', tasks: ['Select Drop-off Reason', 'Archive Lead'], statusMapping: LeadStatus.LOST }
   ];
 
@@ -529,9 +533,9 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
       stage3: stage(3, 'Medical Documents', 'Documents', 'stage3_checklist', ['process_explained_at', 'document_request_sent_at', 'documents_received_count', 'document_request_whatsapp_message']),
       stage4: stage(4, 'In-House Doctor Interaction', 'Doctor Inbox', 'stage4_checklist', ['assigned_doctor_name', 'doctor_inbox_status', 'doctor_assigned_at', 'doctor_call_notes', 'doctor_call_at', 'personal_email_sent_at', 'initial_doctor_assessment', 'doctor_next_steps', 'doctor_interaction_complete', 'doctor_call_notes_saved_at', 'initial_doctor_assessment_saved_at']),
       stage5: stage(5, 'Clinical Qualification & Planning', 'Clinical', 'stage5_checklist', ['suggested_hospital', 'suggested_hospital_id', 'suggested_surgeon', 'suggested_surgeon_id', 'suggested_hospitals', 'suggested_surgeons', 'suggested_procedures', 'illness_history', 'clinical_summary', 'clinical_recommendation_finalized', 'clinical_review_confirmed', 'clinical_review_confirmed_at', 'clinical_review_confirmed_by', 'clinical_decision', 'clinical_report_generated_at']),
-      stage6: stage(6, 'Financial & Logistics Proposal', 'BDM Pipeline', 'stage6_checklist', ['quotation_details', 'quotation_items', 'travel_accommodation', 'patient_concerns', 'financial_proposal_pdf', 'proposal_sent_at', 'patient_interest', 'patient_interest_reason', 'selected_quotation_id', 'selected_quotation_label', 'selected_quotation_total', 'selected_quotation_currency', 'selected_quotation_at', 'selected_quotation_sent_at', 'estimated_cost_min', 'estimated_cost_max', 'estimated_cost_currency', 'estimated_cost_notes', 'specialist_consultation_booked']),
-      stage7: stage(7, 'Specialist Consultation, Payment & Confirmation', 'Specialist Consult & Payment', 'stage7_checklist', ['specialist_call_completed_at', 'specialist_call_notes', 'mom_date_time', 'mom_participants', 'mom_discussion_points', 'mom_specialist_observations', 'mom_patient_questions', 'mom_decisions', 'mom_next_steps', 'mom_instructions', 'mom_recorded_at', 'mom_pdf_path', 'mom_pdf_url', 'bdm_call_completed_at', 'bdm_call_notes', 'quotation_agreement_confirmed', 'clinical_process_agreement_confirmed', 'stage7_patient_decision', 'stage7_disagreement_reason', 'stage7_disagreement_concern', 'stage7_disagreement_followup', 'request_to_proceed_confirmed', 'request_to_proceed_at', 'payment_link', 'payment_reference', 'payment_link_provided_at', 'payment_status', 'payment_date_time', 'payment_amount', 'advance_payment_verified', 'vil_form_sent_at']),
-      stage8: stage(8, 'Medical Case Handover', 'CDM/WaruBuddy Handover', 'stage8_checklist', ['medical_case_id', 'converted_at', 'handover_prepared_at', 'patient_user_id', 'patient_patient_id', 'patient_account_created_at', 'patient_account_status', 'patient_account_error', 'patient_invitation_sent_at', 'handover_bdm_name', 'handover_cdm_team', 'handover_status', 'handover_case_information', 'clinical_information_shared', 'financial_information_shared', 'specialist_mom_information_shared', 'handover_initiated_at', 'handover_accepted_at', 'case_ownership_confirmed_at', 'stage8_completed_at']),
+      stage6: stage(6, 'Financial & Logistics Proposal', 'BDM Pipeline', 'stage6_checklist', ['quotation_details', 'quotation_items', 'travel_accommodation', 'patient_concerns', 'financial_proposal_pdf', 'proposal_sent_at', 'patient_interest', 'patient_interest_reason', 'estimated_cost_min', 'estimated_cost_max', 'estimated_cost_currency', 'estimated_cost_notes', 'specialist_consultation_booked']),
+      stage7: stage(7, 'Specialist Consultation, Payment & Confirmation', 'Specialist Consult & Payment', 'stage7_checklist', ['specialist_call_completed_at', 'specialist_call_notes', 'mom_date_time', 'mom_participants', 'mom_discussion_points', 'mom_specialist_observations', 'mom_patient_questions', 'mom_decisions', 'mom_next_steps', 'mom_instructions', 'mom_recorded_at', 'mom_pdf_path', 'mom_pdf_url', 'bdm_call_completed_at', 'bdm_call_notes', 'quotation_agreement_confirmed', 'clinical_process_agreement_confirmed', 'stage7_patient_decision', 'stage7_disagreement_reason', 'stage7_disagreement_concern', 'stage7_disagreement_followup', 'request_to_proceed_confirmed', 'request_to_proceed_at', 'vil_form_sent_at', 'visa_application_sent_at', 'visa_application_created', 'visa_application_created_at', 'visa_document_path', 'visa_document_name', 'visa_document_uploaded_at']),
+      stage8: stage(8, 'Medical Case Handover', 'CDM/WaruBuddy Handover', 'stage8_checklist', ['payment_link', 'payment_reference', 'payment_link_provided_at', 'payment_status', 'payment_date_time', 'payment_amount', 'advance_payment_verified', 'medical_case_id', 'converted_at', 'handover_prepared_at', 'patient_user_id', 'patient_patient_id', 'patient_account_created_at', 'patient_account_status', 'patient_account_error', 'patient_invitation_sent_at', 'handover_bdm_name', 'handover_cdm_team', 'handover_status', 'handover_case_information', 'clinical_information_shared', 'financial_information_shared', 'specialist_mom_information_shared', 'handover_initiated_at', 'handover_accepted_at', 'case_ownership_confirmed_at', 'stage8_completed_at']),
       stage9: stage(9, 'Lost / Dropped', 'Archived', 'stage9_checklist', ['dropoff_reason', 'archived_at', 'dropped_from_stage', 'dropped_at', 'resume_stage']),
     };
   };
@@ -874,7 +878,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
     if (error) toast.error('Stage 7 progress could not be synced');
   };
 
-  const handleGenerateStage7PaymentLink = async () => {
+  const handleGenerateAdvancePaymentLink = async () => {
     if (!vilSubmission) {
       toast.error('The patient must submit the VIL medical visa form before the advance payment link is generated.');
       return;
@@ -882,23 +886,23 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
     if (!selectedLead) return;
     const link = `https://waruwenjo.com/pay/${selectedLead.id}?ref=advance`;
     const reference = `WJO-PAY-${Math.floor(Math.random() * 100000)}`;
-    await saveStage7Task('Generate Payment Link', { payment_link: link, payment_reference: reference, payment_status: 'Pending' });
+    await saveStage8Task('Generate Payment Link', { payment_link: link, payment_reference: reference, payment_status: 'Pending' });
     try { await navigator.clipboard.writeText(link); } catch { /* Clipboard access is optional. */ }
     toast.success('Payment link generated and copied to clipboard');
   };
 
-  const handleVerifyStage7AdvancePayment = async () => {
+  const handleVerifyAdvancePayment = async () => {
     const state = workflowStateRef.current || localWorkflowState;
     if (!state?.payment_reference || !state?.payment_link) {
       toast.error('Generate and provide the payment link before verifying payment.');
       return;
     }
-    await saveStage7Task('Verify Advance Payment', {
+    await saveStage8Task('Verify Advance Payment', {
       advance_payment_verified: true,
       payment_status: 'Verified',
       payment_date_time: new Date().toISOString(),
     });
-    toast.success('Advance payment verified in Stage 7');
+    toast.success('Advance payment verified');
   };
 
   const handleCompleteSpecialistCall = async (notes: string) => {
@@ -1103,7 +1107,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
       return;
     }
     const currentState = workflowStateRef.current || localWorkflowState || {};
-    await saveStage7Task('Provide Payment Link', {
+    await saveStage8Task('Provide Payment Link', {
       payment_link: link.trim(),
       payment_reference: currentState.payment_reference || `WJO-PAY-${Math.floor(Math.random() * 100000)}`,
       payment_link_provided_at: new Date().toISOString(),
@@ -1287,29 +1291,93 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
     toast.success('Stage 8 completed');
   };
 
-  const handleSelectQuotation = async (quotation: { id: string; label: string; total: number; currency: string }) => {
-    await saveStage6Task('Select Patient Quotation', {
-      selected_quotation_id: quotation.id,
-      selected_quotation_label: quotation.label,
-      selected_quotation_total: quotation.total,
-      selected_quotation_currency: quotation.currency,
-      selected_quotation_at: new Date().toISOString(),
-      selected_quotation_sent_at: null,
-    });
+  // BDM ownership of leads
+  const bdmNameFor = (id?: string | null) => {
+    if (!id) return 'Unassigned';
+    return bdmUsers.find((u) => u.id === id)?.full_name || 'Assigned BDM';
+  };
+  const bdmIdFor = (lead: any): string | null =>
+    leads.find((l) => l.id === lead.id)?.assignedBdmId ?? lead.assignedBdmId ?? null;
+
+  const handleAssignBdm = async (leadId: string, bdmId: string | null) => {
+    const { error } = await updatePatientEnquiry(leadId, { assigned_bdm_id: bdmId });
+    if (error) {
+      toast.error(`Could not assign BDM: ${error.message}`);
+      return;
+    }
+    setLeads((prev) => prev.map((l) => (l.id === leadId ? { ...l, assignedBdmId: bdmId } : l)));
+    await logAdminActivity('BDM Assigned', 'Patient Lead', leadId, { bdm_id: bdmId, bdm_name: bdmNameFor(bdmId) });
+    loadActivityLogs(leadId);
+    toast.success(bdmId ? `Assigned to ${bdmNameFor(bdmId)}` : 'BDM unassigned');
   };
 
-  const handleSelectedQuotationSent = async (quotation: { id: string; label: string }) => {
-    const sentAt = new Date().toISOString();
-    await saveStage6Task('Send Selected Quotation', { selected_quotation_sent_at: sentAt, proposal_sent_at: sentAt });
-    if (selectedLead) {
-      await logAdminActivity('Selected Quotation Emailed to Patient', 'Patient Lead', selectedLead.id, {
-        email: selectedLead.email,
-        quotation_id: quotation.id,
-        quotation: quotation.label,
-      });
-      loadActivityLogs(selectedLead.id);
+  // Patient's quotation choice lives in patient_enquiries columns. It is kept in its own state map
+  // so refreshing it never resets unsaved edits in the stage form.
+  type QuotationChoiceInfo = { quotationChoice: any; selectedQuotationNo: number | null; selectedQuotationAt: string | null };
+  const [quotationChoices, setQuotationChoices] = useState<Record<string, QuotationChoiceInfo>>({});
+
+  const choiceFor = (lead: any): QuotationChoiceInfo =>
+    quotationChoices[lead.id] ?? {
+      quotationChoice: lead.quotationChoice ?? null,
+      selectedQuotationNo: lead.selectedQuotationNo ?? null,
+      selectedQuotationAt: lead.selectedQuotationAt ?? null,
+    };
+
+  const refreshQuotationChoice = async (leadId?: string) => {
+    const id = leadId || selectedLead?.id;
+    if (!id) return;
+    const { data, error } = await supabase
+      .from('patient_enquiries')
+      .select('quotation_choice, selected_quotation_no, selected_quotation_at')
+      .eq('id', id)
+      .maybeSingle();
+    if (error || !data) {
+      toast.error('Could not check the patient choice.');
+      return;
     }
+    const row: any = data;
+    setQuotationChoices((prev) => ({
+      ...prev,
+      [id]: {
+        quotationChoice: row.quotation_choice ?? null,
+        selectedQuotationNo: row.selected_quotation_no ?? null,
+        selectedQuotationAt: row.selected_quotation_at ?? null,
+      },
+    }));
   };
+
+  // Staff fallback: patient told us their choice by phone / WhatsApp
+  const handleSelectQuotation = async (quotation: { no: number; id: string; label: string; total: number; currency: string }) => {
+    if (!selectedLead) return;
+    const selectedAt = new Date().toISOString();
+    const { error } = await supabase
+      .from('patient_enquiries')
+      .update({ selected_quotation_no: quotation.no, selected_quotation_at: selectedAt } as any)
+      .eq('id', selectedLead.id);
+    if (error) {
+      toast.error(`Could not record the choice: ${error.message}`);
+      return;
+    }
+    await refreshQuotationChoice(selectedLead.id);
+    await logAdminActivity('Patient Quotation Selected', 'Patient Lead', selectedLead.id, { quotation: quotation.label });
+    loadActivityLogs(selectedLead.id);
+    toast.success(`${quotation.label} recorded as the patient's choice`);
+  };
+
+  const handleQuotationOptionsSent = async ({ token }: { token: string; sentAt: string }) => {
+    if (!selectedLead) return;
+    await refreshQuotationChoice(selectedLead.id);
+    await logAdminActivity('Quotation Options Emailed to Patient', 'Patient Lead', selectedLead.id, {
+      email: selectedLead.email,
+      choice_token: token,
+    });
+    loadActivityLogs(selectedLead.id);
+  };
+
+  // Pick up the patient's choice whenever Stage 6 is opened
+  useEffect(() => {
+    if (selectedLead?.id && activeWorkflowStage === 6) refreshQuotationChoice(selectedLead.id);
+  }, [selectedLead?.id, activeWorkflowStage]);
 
   const handleConfirmPatientInterest = async (interest: 'Agreed' | 'Disagreed') => {
     await saveStage6Task('Confirm Patient Interest Via Call', { patient_interest: interest });
@@ -1341,6 +1409,70 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
     const { data, error } = await supabase.storage.from('vil_docs').createSignedUrl(doc.file_path, 3600);
     if (error || !data?.signedUrl) {
       toast.error(error?.message || 'Could not open the VIL document');
+      return;
+    }
+    window.open(data.signedUrl, '_blank', 'noopener');
+  };
+
+  const saveVisaFlag = async (task: string, patch: Record<string, any>) => {
+    await saveStage7Task(task, patch);
+  };
+
+  const handleToggleVisaSent = async (checked: boolean) => {
+    await saveVisaFlag('Send Visa Application', { visa_application_sent_at: checked ? new Date().toISOString() : null });
+    if (selectedLead) loadActivityLogs(selectedLead.id);
+  };
+
+  const handleToggleVisaCreated = async (checked: boolean) => {
+    await saveVisaFlag('Visa Application Created', {
+      visa_application_created: checked,
+      visa_application_created_at: checked ? new Date().toISOString() : null,
+    });
+  };
+
+  const handleUploadVisaDocument = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file || !selectedLead) return;
+    const allowedTypes = ['application/pdf', 'image/jpeg', 'image/png'];
+    if (!allowedTypes.includes(file.type)) {
+      toast.error('Upload a PDF, JPG or PNG file');
+      return;
+    }
+    if (file.size > 10 * 1024 * 1024) {
+      toast.error('The visa document must be 10 MB or smaller');
+      return;
+    }
+    setIsUploadingVisa(true);
+    try {
+      const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const path = `${selectedLead.id}/${Date.now()}_${safeName}`;
+      const { error } = await supabase.storage
+        .from('visa-applications')
+        .upload(path, file, { contentType: file.type, upsert: false });
+      if (error) throw error;
+
+      await saveVisaFlag('Upload Visa Document', {
+        visa_document_path: path,
+        visa_document_name: file.name,
+        visa_document_uploaded_at: new Date().toISOString(),
+      });
+      await logAdminActivity('Visa Document Uploaded', 'Patient Lead', selectedLead.id, { file_name: file.name });
+      loadActivityLogs(selectedLead.id);
+      toast.success('Visa document uploaded');
+    } catch (err: any) {
+      toast.error(err?.message || 'Visa document upload failed');
+    } finally {
+      setIsUploadingVisa(false);
+    }
+  };
+
+  const openVisaDocument = async () => {
+    const path = localWorkflowState?.visa_document_path;
+    if (!path) return;
+    const { data, error } = await supabase.storage.from('visa-applications').createSignedUrl(path, 3600);
+    if (error || !data?.signedUrl) {
+      toast.error(error?.message || 'Could not open the visa document');
       return;
     }
     window.open(data.signedUrl, '_blank', 'noopener');
@@ -2390,6 +2522,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
     loadDoctors();
     loadHospitals();
     loadInHouseDoctors();
+    fetchCrmUsersByRole('bdm').then(setBdmUsers);
   }, []);
 
   const loadInHouseDoctors = async () => {
@@ -2433,6 +2566,10 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
         createdAt: item.created_at,
         workflowStage: Number(item.workflow_stage) || 1,
         workflowState: typeof item.workflow_state === 'string' ? (() => { try { return JSON.parse(item.workflow_state); } catch { return {}; } })() : (item.workflow_state || {}),
+        quotationChoice: item.quotation_choice || null,
+        selectedQuotationNo: item.selected_quotation_no ?? null,
+        selectedQuotationAt: item.selected_quotation_at ?? null,
+        assignedBdmId: item.assigned_bdm_id ?? null,
         assignedTo: item.assigned_to,
       }));
       setLeads(mappedLeads);
@@ -2533,7 +2670,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
       return;
     }
     if (!Boolean(currentState?.advance_payment_verified)) {
-      toast.error('Verify the advance payment in Stage 7 before converting this lead.');
+      toast.error('Verify the advance payment in Stage 8 before converting this lead.');
       return;
     }
 
@@ -2621,6 +2758,12 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
       toast.error(error?.message || 'Medical case was not returned by Supabase. Check the browser console and SQL function response.');
       setIsConvertingToCase(false);
       return;
+    }
+
+    // The new medical case belongs to the same BDM as the lead
+    const leadBdmId = selectedLead ? bdmIdFor(selectedLead) : null;
+    if (leadBdmId && caseData?.id) {
+      await supabase.from('medical_cases').update({ assigned_bdm_id: leadBdmId } as any).eq('id', caseData.id);
     }
 
     const saveResult = await saveStage8Task('Convert Lead to Medical Case', {
@@ -2900,6 +3043,40 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                         <span className={`text-[9px] font-black px-4 py-1.5 rounded-full uppercase tracking-widest border ${getStatusColor(lead.status)}`}>
                           {lead.status === 'won' ? 'Converted' : lead.status}
                         </span>
+                        {(() => {
+                          const choice = choiceFor(lead);
+                          if (choice.selectedQuotationNo) {
+                            return (
+                              <span title={choice.selectedQuotationAt ? `Chosen ${new Date(choice.selectedQuotationAt).toLocaleString()}` : ''} className="text-[9px] font-black px-4 py-1.5 rounded-full uppercase tracking-widest border bg-emerald-50 text-emerald-700 border-emerald-200">
+                                Chose Quotation {choice.selectedQuotationNo}
+                              </span>
+                            );
+                          }
+                          if (choice.quotationChoice?.sent_at) {
+                            return (
+                              <span className="text-[9px] font-black px-4 py-1.5 rounded-full uppercase tracking-widest border bg-amber-50 text-amber-700 border-amber-200">
+                                Options sent
+                              </span>
+                            );
+                          }
+                          return null;
+                        })()}
+                        {canAssignBdm ? (
+                          <select
+                            value={bdmIdFor(lead) || ''}
+                            onClick={(e) => e.stopPropagation()}
+                            onChange={(e) => handleAssignBdm(lead.id, e.target.value || null)}
+                            className="text-[9px] font-black uppercase tracking-widest px-3 py-1.5 rounded-full border border-slate-200 bg-white text-slate-600"
+                            title="Assigned BDM"
+                          >
+                            <option value="">BDM: Unassigned</option>
+                            {bdmUsers.map((u) => <option key={u.id} value={u.id}>BDM: {u.full_name}</option>)}
+                          </select>
+                        ) : (
+                          <span className="text-[9px] font-black px-4 py-1.5 rounded-full uppercase tracking-widest border bg-slate-50 text-slate-600 border-slate-200">
+                            BDM: {bdmNameFor(bdmIdFor(lead))}
+                          </span>
+                        )}
                       </div>
                     </td>
                     <td className="px-10 py-8 text-right">
@@ -2959,6 +3136,22 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                   <X size={24} />
                 </button>
               </div>
+            </div>
+
+            <div className="px-10 pt-8 flex items-center gap-3 flex-wrap">
+              <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Assigned BDM</p>
+              {canAssignBdm ? (
+                <select
+                  value={bdmIdFor(selectedLead) || ''}
+                  onChange={(e) => handleAssignBdm(selectedLead.id, e.target.value || null)}
+                  className="text-xs font-bold border border-slate-200 rounded-xl px-3 py-2 bg-white"
+                >
+                  <option value="">Unassigned</option>
+                  {bdmUsers.map((u) => <option key={u.id} value={u.id}>{u.full_name}</option>)}
+                </select>
+              ) : (
+                <span className="text-xs font-black text-slate-700">{bdmNameFor(bdmIdFor(selectedLead))}</span>
+              )}
             </div>
 
             <div className="p-10 space-y-12">
@@ -3496,10 +3689,12 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                           <div className="space-y-4">
                             <LeadQuotationPanel
                               lead={selectedLead}
-                              selectedQuotationId={localWorkflowState?.selected_quotation_id || null}
-                              selectedQuotationSentAt={localWorkflowState?.selected_quotation_sent_at || null}
+                              selectedQuotationNo={choiceFor(selectedLead).selectedQuotationNo}
+                              selectedQuotationAt={choiceFor(selectedLead).selectedQuotationAt}
+                              optionsSentAt={choiceFor(selectedLead).quotationChoice?.sent_at ?? null}
                               onSelectQuotation={handleSelectQuotation}
-                              onQuotationSent={handleSelectedQuotationSent}
+                              onOptionsSent={handleQuotationOptionsSent}
+                              onRefreshChoice={() => refreshQuotationChoice(selectedLead.id)}
                               readOnly={isStageReadOnly}
                             />
 
@@ -3508,11 +3703,9 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                                   <p className="text-xs text-slate-600 font-bold text-center mb-6 px-4">
                                     Are you interested to proceed with the following procedures suggested by the doctor?
                                   </p>
-                                  {localWorkflowState?.selected_quotation_id && (
+                                  {choiceFor(selectedLead).selectedQuotationNo && (
                                     <p className="text-[10px] font-black text-emerald-700 uppercase tracking-widest text-center mb-4">
-                                      Patient's choice: {localWorkflowState?.selected_quotation_label || 'Selected quotation'}
-                                      {localWorkflowState?.selected_quotation_total ? ` · ${localWorkflowState?.selected_quotation_currency || ''} ${Number(localWorkflowState.selected_quotation_total).toLocaleString()}` : ''}
-                                      {localWorkflowState?.selected_quotation_sent_at ? ' · emailed' : ' · not emailed yet'}
+                                      Patient's choice: Quotation {choiceFor(selectedLead).selectedQuotationNo}
                                     </p>
                                   )}
                                   <div className="flex gap-4 justify-center">
@@ -3656,7 +3849,35 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                                   )}
                                 </div>
                              </div>
-                             <div className="p-5 bg-amber-50 border border-amber-100 rounded-3xl space-y-3"><p className="text-[9px] font-black text-amber-700 uppercase tracking-widest">Step 5 — Payment Link & Advance Payment</p><button onClick={handleGenerateStage7PaymentLink} className="w-full p-3 bg-indigo-600 text-white rounded-xl font-black text-[10px] uppercase tracking-widest">{localWorkflowState?.payment_reference ? '✓ Payment Link Generated' : 'Generate Payment Link'}</button><input value={localWorkflowState?.payment_link || ''} onChange={(e) => handleUpdateSummary('payment_link', e.target.value)} placeholder="https://payment.example.com/..." className="w-full p-3 bg-white border border-amber-100 rounded-xl text-xs font-bold" /><button onClick={() => handleProvidePaymentLink(localWorkflowState?.payment_link || '')} className="w-full p-3 bg-amber-600 text-white rounded-xl font-black text-[10px] uppercase tracking-widest">{localWorkflowState?.payment_link_provided_at ? '✓ Payment Link Provided' : 'Provide Payment Link'}</button><div className="grid grid-cols-2 gap-3"><input type="text" value={localWorkflowState?.payment_status || ''} onChange={(e) => handleUpdateSummary('payment_status', e.target.value)} placeholder="Payment status" className="p-3 bg-white border border-amber-100 rounded-xl text-xs" /><input type="number" value={localWorkflowState?.payment_amount ?? ''} onChange={(e) => handleUpdateSummary('payment_amount', e.target.value ? Number(e.target.value) : null)} placeholder="Amount" className="p-3 bg-white border border-amber-100 rounded-xl text-xs" /></div><button onClick={handleVerifyStage7AdvancePayment} className={`w-full p-3 rounded-xl font-black text-[10px] uppercase tracking-widest ${localWorkflowState?.advance_payment_verified ? 'bg-teal-600 text-white' : 'bg-white text-teal-700 border border-teal-100'}`}>{localWorkflowState?.advance_payment_verified ? '✓ Advance Payment Verified' : 'Verify Advance Payment'}</button></div>
+                             <div className="p-5 bg-sky-50/70 border border-sky-100 rounded-3xl space-y-4">
+                                <p className="text-[9px] font-black text-sky-700 uppercase tracking-widest">Step 4c — Visa Application</p>
+                                <label className="flex items-center gap-3 p-3 bg-white rounded-xl border border-sky-100 cursor-pointer">
+                                  <input type="checkbox" className="w-4 h-4 accent-sky-600" checked={Boolean(localWorkflowState?.visa_application_sent_at)} disabled={isStageReadOnly} onChange={(e) => handleToggleVisaSent(e.target.checked)} />
+                                  <span className="text-xs font-black text-slate-700">Send visa application</span>
+                                  {localWorkflowState?.visa_application_sent_at && <span className="ml-auto text-[10px] font-bold text-slate-400">{new Date(localWorkflowState.visa_application_sent_at).toLocaleString()}</span>}
+                                </label>
+                                <label className="flex items-center gap-3 p-3 bg-white rounded-xl border border-sky-100 cursor-pointer">
+                                  <input type="checkbox" className="w-4 h-4 accent-sky-600" checked={Boolean(localWorkflowState?.visa_application_created)} disabled={isStageReadOnly} onChange={(e) => handleToggleVisaCreated(e.target.checked)} />
+                                  <span className="text-xs font-black text-slate-700">Visa application created</span>
+                                  {localWorkflowState?.visa_application_created_at && <span className="ml-auto text-[10px] font-bold text-slate-400">{new Date(localWorkflowState.visa_application_created_at).toLocaleString()}</span>}
+                                </label>
+                                <div className="p-4 bg-white rounded-xl border-2 border-dashed border-sky-200 space-y-3">
+                                  <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Visa document</p>
+                                  {localWorkflowState?.visa_document_path ? (
+                                    <div className="flex items-center justify-between gap-3 flex-wrap">
+                                      <p className="text-xs font-bold text-slate-700 truncate max-w-[260px]">{localWorkflowState.visa_document_name || 'Visa document'}</p>
+                                      <button type="button" onClick={openVisaDocument} className="text-[10px] font-black text-sky-700 uppercase tracking-widest underline">View</button>
+                                    </div>
+                                  ) : (
+                                    <p className="text-[10px] font-bold text-slate-400">No visa document uploaded yet</p>
+                                  )}
+                                  <label className={`block w-full p-3 text-center rounded-xl font-black text-[10px] uppercase tracking-widest cursor-pointer ${isUploadingVisa || isStageReadOnly ? 'bg-slate-200 text-slate-400 cursor-not-allowed' : 'bg-sky-600 text-white hover:bg-sky-700'}`}>
+                                    {isUploadingVisa ? 'Uploading…' : localWorkflowState?.visa_document_path ? 'Replace visa document' : 'Upload visa document'}
+                                    <input type="file" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" className="hidden" disabled={isUploadingVisa || isStageReadOnly} onChange={handleUploadVisaDocument} />
+                                  </label>
+                                  <p className="text-[9px] font-bold text-slate-400">PDF, JPG or PNG · max 10 MB</p>
+                                </div>
+                             </div>
                              <button onClick={() => { if (validateStage(7)) handleStageJump(8); else toast.error('Complete all Stage 7 checklist items first.'); }} className={`w-full p-5 rounded-[1.5rem] font-black text-xs uppercase tracking-widest flex items-center justify-center gap-3 shadow-xl ${validateStage(7) ? 'bg-indigo-600 text-white hover:bg-indigo-700' : 'bg-slate-200 text-slate-400 cursor-not-allowed opacity-60'}`}><ChevronRight size={18} /> {validateStage(7) ? 'Proceed to Stage 8' : 'Complete Stage 7 Checklist to Proceed'}</button>
                            </div>
                         )}
@@ -3665,8 +3886,9 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                           <div className="space-y-5">
                              <div className="p-5 bg-emerald-50 border border-emerald-100 rounded-3xl space-y-3">
                                 <p className="text-[10px] font-black text-emerald-700 uppercase tracking-widest">Stage 8: Medical Case Handover</p>
-                                <p className="text-xs text-slate-600">All payment activities—including payment-link generation, sending, reference recording, and advance-payment verification—are completed in Stage 7. Stage 8 first creates or links the patient website account, then converts the linked patient into a medical case, and finally hands the connected patient record to CDM/WaruBuddy.</p>
+                                <p className="text-xs text-slate-600">The advance payment (payment link and verification) is completed here in Stage 8 before the lead is converted. Visa application steps are handled in Stage 7. Stage 8 then creates or links the patient website account, converts the patient into a medical case, and hands the connected record to CDM/WaruBuddy.</p>
                              </div>
+                             <div className="p-5 bg-amber-50 border border-amber-100 rounded-3xl space-y-3"><p className="text-[9px] font-black text-amber-700 uppercase tracking-widest">Advance Payment — Payment Link & Verification</p><button onClick={handleGenerateAdvancePaymentLink} className="w-full p-3 bg-indigo-600 text-white rounded-xl font-black text-[10px] uppercase tracking-widest">{localWorkflowState?.payment_reference ? '✓ Payment Link Generated' : 'Generate Payment Link'}</button><input value={localWorkflowState?.payment_link || ''} onChange={(e) => handleUpdateSummary('payment_link', e.target.value)} placeholder="https://payment.example.com/..." className="w-full p-3 bg-white border border-amber-100 rounded-xl text-xs font-bold" /><button onClick={() => handleProvidePaymentLink(localWorkflowState?.payment_link || '')} className="w-full p-3 bg-amber-600 text-white rounded-xl font-black text-[10px] uppercase tracking-widest">{localWorkflowState?.payment_link_provided_at ? '✓ Payment Link Provided' : 'Provide Payment Link'}</button><div className="grid grid-cols-2 gap-3"><input type="text" value={localWorkflowState?.payment_status || ''} onChange={(e) => handleUpdateSummary('payment_status', e.target.value)} placeholder="Payment status" className="p-3 bg-white border border-amber-100 rounded-xl text-xs" /><input type="number" value={localWorkflowState?.payment_amount ?? ''} onChange={(e) => handleUpdateSummary('payment_amount', e.target.value ? Number(e.target.value) : null)} placeholder="Amount" className="p-3 bg-white border border-amber-100 rounded-xl text-xs" /></div><button onClick={handleVerifyAdvancePayment} className={`w-full p-3 rounded-xl font-black text-[10px] uppercase tracking-widest ${localWorkflowState?.advance_payment_verified ? 'bg-teal-600 text-white' : 'bg-white text-teal-700 border border-teal-100'}`}>{localWorkflowState?.advance_payment_verified ? '✓ Advance Payment Verified' : 'Verify Advance Payment'}</button></div>
                              <div className="p-5 bg-indigo-50/70 border border-indigo-100 rounded-3xl space-y-3">
                                 <p className="text-[9px] font-black text-indigo-700 uppercase tracking-widest">BDM → CDM/WaruBuddy Handover</p>
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3"><input value={localWorkflowState?.handover_bdm_name || ''} onChange={(e) => handleUpdateSummary('handover_bdm_name', e.target.value)} placeholder="BDM name" className="p-3 bg-white border border-indigo-100 rounded-xl text-xs" /><input value={localWorkflowState?.handover_cdm_team || 'CDM/WaruBuddy'} onChange={(e) => handleUpdateSummary('handover_cdm_team', e.target.value)} placeholder="CDM/WaruBuddy team" className="p-3 bg-white border border-indigo-100 rounded-xl text-xs" /></div>
@@ -3690,7 +3912,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                                     type="button"
                                     onClick={() => handleConvertToCase(selectedLead)}
                                     disabled={!Boolean(localWorkflowState?.patient_user_id) || !Boolean(localWorkflowState?.advance_payment_verified) || Boolean(localWorkflowState?.medical_case_id) || isConvertingToCase}
-                                    title={!localWorkflowState?.patient_user_id ? 'Create and link the patient profile first' : !localWorkflowState?.advance_payment_verified ? 'Verify the advance payment in Stage 7 first' : undefined}
+                                    title={!localWorkflowState?.patient_user_id ? 'Create and link the patient profile first' : !localWorkflowState?.advance_payment_verified ? 'Verify the advance payment first' : undefined}
                                     className="w-full p-3 bg-slate-900 text-white rounded-xl font-black text-[10px] uppercase tracking-widest disabled:opacity-50"
                                   >
                                     {localWorkflowState?.medical_case_id

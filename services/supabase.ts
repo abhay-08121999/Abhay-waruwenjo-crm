@@ -907,6 +907,34 @@ export const fetchProfileById = async (id: string) => {
   return data;
 };
 
+// Users holding a CRM role, from the role system (user_roles + crm_user_profiles).
+// Used for BDM / CDM / buddy pickers. Returns [{ id, full_name, email }].
+export const fetchCrmUsersByRole = async (role: 'bdm' | 'cdm' | 'waru_buddy') => {
+  const db = supabase as any;
+  const { data: roleRows, error: roleError } = await db.from('user_roles').select('user_id').eq('role', role);
+  if (roleError) {
+    console.error(`Error fetching role assignments for ${role}:`, roleError);
+    return [];
+  }
+  const ids: string[] = (roleRows || []).map((r: any) => r.user_id);
+  if (ids.length === 0) return [];
+
+  const { data: profiles, error } = await db
+    .from('crm_user_profiles')
+    .select('user_id, full_name, email')
+    .in('user_id', ids)
+    .order('full_name', { ascending: true });
+  if (error) {
+    console.error(`Error fetching profiles for ${role}:`, error);
+    return [];
+  }
+  return (profiles || []).map((p: any) => ({
+    id: p.user_id as string,
+    full_name: (p.full_name as string) || (p.email as string) || 'Unnamed user',
+    email: p.email as string,
+  }));
+};
+
 export const fetchUsersByRole = async (role: AppRole) => {
   const { data, error } = await supabase
     .from('profiles')
