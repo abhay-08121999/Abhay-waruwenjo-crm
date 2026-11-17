@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { CrmRole, getCustomStageAccess } from '../services/roles';
+import { useLeadGrants } from '../services/leadAccess';
 
 type ViewMode = 'TABLE' | 'BOARD';
 
@@ -16,7 +17,8 @@ const Leads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   // Custom roles only see and edit the stages ticked for them (Read / Write) in User & Role Management.
   const stageAccess = getCustomStageAccess(roles, 'medical_leads');
   const canReadMedicalStage = (stageId: number) => !stageAccess || stageAccess.read.has(stageId);
-  const canWriteMedicalStage = (stageId: number) => !stageAccess || stageAccess.write.has(stageId);
+  const canWriteMedicalStage = (stageId: number) =>
+    !isCurrentLeadLocked && (!stageAccess || stageAccess.write.has(stageId));
   const blockReadOnlyMedicalWrite = (stageId: number) => {
     if (canWriteMedicalStage(stageId)) return false;
     toast.error('You have read-only access to this stage.');
@@ -27,6 +29,11 @@ const Leads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [viewMode, setViewMode] = useState<ViewMode>('BOARD');
   const [selectedLead, setSelectedLead] = useState<any | null>(null);
+
+  // BDMs can write only to the leads granted to them by the super admin.
+  const { restricted: leadRestricted, isGranted } = useLeadGrants(roles);
+  const isCurrentLeadLocked =
+    leadRestricted && !!selectedLead && !isGranted('medical', selectedLead.id);
   const [showNewPartner, setShowNewPartner] = useState(false);
   const [savingPartner, setSavingPartner] = useState(false);
   const [partnerForm, setPartnerForm] = useState({
