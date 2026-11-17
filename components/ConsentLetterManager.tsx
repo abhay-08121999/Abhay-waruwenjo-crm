@@ -23,6 +23,8 @@ type ConsentLetterRow = {
   version: string | null;
   document_content?: string | null;
   pdf_path?: string | null;
+  /** Medical lead this consent letter belongs to (shows in the Medical Leads pipeline, Stage 3). */
+  source_lead_id?: string | null;
   created_at?: string | null;
 };
 
@@ -179,6 +181,8 @@ const ConsentLetterManager: React.FC = () => {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [templateId, setTemplateId] = useState('');
   const [fields, setFields] = useState<Record<string, string>>(INITIAL_FIELDS);
+  // Set when the letter is created from a Medical Lead ("Create Consent for this Lead").
+  const [sourceLeadId, setSourceLeadId] = useState<string | null>(null);
   const [templateHtml, setTemplateHtml] = useState(DEFAULT_TEMPLATE);
   const [editingTemplateId, setEditingTemplateId] = useState<string | null>(null);
   const [templateName, setTemplateName] = useState('');
@@ -221,6 +225,38 @@ const ConsentLetterManager: React.FC = () => {
     void loadTemplates();
   }, [loadLetters, loadTemplates]);
 
+  // Medical Leads hand-off: "Create Consent for this Lead" stores the lead details in
+  // localStorage and opens this page. Prefill the builder and remember the lead so the
+  // saved letter appears in that lead's pipeline.
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem('healthhub-agreement-prefill');
+      if (!raw) return;
+      const incoming = JSON.parse(raw) as Record<string, unknown>;
+      // The MOU Builder shares this key - leave MOU hand-offs for it.
+      if (incoming.documentKind !== 'Consent Letter') return;
+
+      const str = (key: string) => String(incoming[key] ?? '').trim();
+      setSelectedId(null);
+      setSourceLeadId(str('sourceLeadId') || null);
+      setTemplateId('');
+      setTemplateHtml(DEFAULT_TEMPLATE);
+      setFields({
+        ...INITIAL_FIELDS,
+        effective_date: new Date().toISOString().slice(0, 10),
+        patient_name: str('representativeName') || str('partnerName'),
+        patient_email: str('representativeEmail'),
+        patient_phone: str('representativePhone'),
+        hospital_name: str('partnerCategory') === 'Hospital' ? str('partnerName') : '',
+        version: str('version') || INITIAL_FIELDS.version,
+      });
+      setTab('builder');
+      window.localStorage.removeItem('healthhub-agreement-prefill');
+    } catch (error) {
+      console.error('Could not prefill Consent Letter from Medical Lead:', error);
+    }
+  }, []);
+
   const buildHtml = useCallback((source: string, values: Record<string, string>) => {
     let html = source || DEFAULT_TEMPLATE;
     Object.entries(values).forEach(([key, value]) => {
@@ -239,6 +275,7 @@ const ConsentLetterManager: React.FC = () => {
 
   const startNew = () => {
     setSelectedId(null);
+    setSourceLeadId(null);
     setTemplateId('');
     setTemplateHtml(DEFAULT_TEMPLATE);
     setFields({ ...INITIAL_FIELDS, effective_date: new Date().toISOString().slice(0, 10) });
@@ -255,6 +292,7 @@ const ConsentLetterManager: React.FC = () => {
       setTemplateHtml(DEFAULT_TEMPLATE);
     }
     setSelectedId(row.id);
+    setSourceLeadId(row.source_lead_id || null);
     setTemplateId('');
     setTab('builder');
   };
@@ -312,7 +350,9 @@ const ConsentLetterManager: React.FC = () => {
         valid_until: fields.valid_until || null,
         version: fields.version || 'v1.0',
         document_content: JSON.stringify({ fields, templateHtml }),
-        updated_at: new Date().toISOString()
+        updated_at: new Date().toISOString(),
+        // Only sent when linked to a Medical Lead, so unlinked letters keep working as before.
+        ...(sourceLeadId ? { source_lead_id: sourceLeadId } : {})
       };
       let saved: any;
       if (selectedId) {
@@ -578,6 +618,15 @@ const ConsentLetterManager: React.FC = () => {
               </button>
               <h2 className="text-lg font-black text-slate-800">{selectedId ? 'Edit Consent Letter' : 'Create Consent Letter'}</h2>
             </div>
+
+            {sourceLeadId && (
+              <div className="flex items-center justify-between gap-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs font-bold text-emerald-800">
+                <span>Linked to a Medical Lead — after saving, this letter will appear in that lead's pipeline (Stage 3).</span>
+                {!selectedId && (
+                  <button type="button" onClick={() => setSourceLeadId(null)} className="shrink-0 underline">Unlink</button>
+                )}
+              </div>
+            )}
 
             <label className="block space-y-1.5">
               <span className="text-xs font-bold text-slate-600">Consent Template</span>

@@ -9,7 +9,8 @@
 // MERGE VARIABLES (replaced at send-time):
 //   {{patient_name}}, {{doctor_name}}, {{hospital_name}},
 //   {{appointment_date}}, {{case_id}}, {{invoice_number}},
-//   {{treatment_name}}, {{recipient_name}}, {{contact_email}}
+//   {{treatment_name}}, {{recipient_name}}, {{contact_email}},
+//   {{document_list}}  (names of the files attached by the "Send Patient / Medical Documents" template)
 // =============================================================
 
 import masterTemplateHtml from '../template5.html?raw';
@@ -32,6 +33,7 @@ export const MERGE_VARIABLES: MergeVariable[] = [
   { key: 'treatment_name',    label: 'Treatment Name',    example: 'Cardiac Bypass'    },
   { key: 'recipient_name',    label: 'Recipient Name',    example: 'John Doe'          },
   { key: 'contact_email',     label: 'Contact Email',     example: 'john@example.com'  },
+  { key: 'document_list',     label: 'Attached Documents', example: '• MRI_Report.pdf'  },
 ];
 
 /**

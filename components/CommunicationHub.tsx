@@ -31,6 +31,9 @@ import {
   Handshake,
   DollarSign,
   Truck,
+  Paperclip,
+  Search,
+  Upload,
 } from 'lucide-react';
 import { CommunicationTemplate, MessageLog } from '../types.ts';
 import { translateMedicalContent } from '../services/geminiService.ts';
@@ -42,6 +45,11 @@ import {
   supabase,
   fetchMasterTemplate,
   updateMasterTemplate,
+  searchPatientLeadsWithDocuments,
+  fetchEnquiryDocumentAsAttachment,
+  blobToBase64,
+  type CrmEmailAttachment,
+  type PatientLeadWithDocuments,
 } from '../services/supabase.ts';
 import { toast } from 'sonner';
 import {
@@ -83,6 +91,45 @@ const CATEGORY_COLORS: Record<string, string> = {
   Clinical:  'bg-red-50 text-red-700 border-red-200',
   General:   'bg-slate-50 text-slate-600 border-slate-200',
 };
+
+// ─── Built-in "Send Patient / Medical Documents" template ────
+// Pinned at the top of the library (not stored in the DB). When selected, the
+// composer shows a document picker and the files are attached to the SMTP email.
+
+const DOCUMENT_TEMPLATE_ID = 'builtin-send-patient-documents';
+
+const DOCUMENT_TEMPLATE = {
+  id: DOCUMENT_TEMPLATE_ID,
+  title: 'Send Patient / Medical Documents',
+  template_name: 'Send Patient / Medical Documents',
+  category: 'Patient',
+  target: 'Patient',
+  target_audience: 'Patient',
+  subject: 'Medical documents for {{patient_name}} ({{case_id}})',
+  body: '',
+  email_title: 'Your Medical Documents',
+  email_subtitle: 'Securely shared by the WaruWenJo Clinical Team',
+  email_content:
+    'Dear {{recipient_name}},\n\n' +
+    'Please find attached the medical documents for {{patient_name}} (Case ID: {{case_id}}).\n\n' +
+    'Attached documents:\n{{document_list}}\n\n' +
+    'If you have any trouble opening the files, or need anything else, simply reply to this email.\n\n' +
+    'Regards,\nWaruWenJo Clinical Team',
+} as CommunicationTemplate;
+
+/** Keep the total attachment size safely below typical SMTP limits (server enforces the same cap). */
+const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
+
+const ACCEPTED_UPLOADS = '.pdf,.jpg,.jpeg,.png,.doc,.docx,.xls,.xlsx,.dcm,.zip';
+
+const formatBytes = (bytes: number) => {
+  if (!bytes) return '0 KB';
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+};
+
+const escapeHtmlText = (v: string) =>
+  v.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
 // ─── Types ────────────────────────────────────────────────────
 
@@ -134,6 +181,14 @@ const CommunicationHub: React.FC = () => {
   const [isTranslating, setIsTranslating] = useState(false);
   const [targetLang, setTargetLang] = useState('English');
   const [copiedVar, setCopiedVar] = useState<string | null>(null);
+
+  // Patient / medical documents (used by the built-in documents template)
+  const [docLeadQuery, setDocLeadQuery] = useState('');
+  const [docLeadResults, setDocLeadResults] = useState<PatientLeadWithDocuments[]>([]);
+  const [isSearchingDocLead, setIsSearchingDocLead] = useState(false);
+  const [docLead, setDocLead] = useState<PatientLeadWithDocuments | null>(null);
+  const [selectedDocIds, setSelectedDocIds] = useState<string[]>([]);
+  const [extraFiles, setExtraFiles] = useState<File[]>([]);
 
   // Recipient autocomplete
   const [suggestions, setSuggestions] = useState<any[]>([]);
@@ -287,6 +342,58 @@ const CommunicationHub: React.FC = () => {
     return () => clearTimeout(delay);
   }, [recipient]);
 
+  // Search patient leads that have uploaded documents (documents template only)
+  const isDocumentTemplate = selectedTemplate?.id === DOCUMENT_TEMPLATE_ID;
+
+  useEffect(() => {
+    if (!isDocumentTemplate || docLead || docLeadQuery.trim().length < 2) {
+      setDocLeadResults([]);
+      return;
+    }
+    const delay = setTimeout(async () => {
+      setIsSearchingDocLead(true);
+      const { data, error } = await searchPatientLeadsWithDocuments(docLeadQuery);
+      if (error) {
+        console.error('Patient lead search failed:', error);
+        toast.error('Could not search patients');
+      }
+      setDocLeadResults(data);
+      setIsSearchingDocLead(false);
+    }, 300);
+    return () => clearTimeout(delay);
+  }, [docLeadQuery, isDocumentTemplate, docLead]);
+
+  const selectedDocs = (docLead?.patient_documents || []).filter(d => selectedDocIds.includes(d.id));
+  const attachmentCount = selectedDocs.length + extraFiles.length;
+  const attachmentBytes =
+    selectedDocs.reduce((sum, d) => sum + (d.file_size || 0), 0) +
+    extraFiles.reduce((sum, f) => sum + f.size, 0);
+  const attachmentsTooLarge = attachmentBytes > MAX_ATTACHMENT_BYTES;
+
+  const resetDocComposer = () => {
+    setDocLeadQuery('');
+    setDocLeadResults([]);
+    setDocLead(null);
+    setSelectedDocIds([]);
+    setExtraFiles([]);
+  };
+
+  const handlePickDocLead = (lead: PatientLeadWithDocuments) => {
+    setDocLead(lead);
+    setDocLeadQuery('');
+    setDocLeadResults([]);
+    setSelectedDocIds(lead.patient_documents.map(d => d.id)); // all selected by default
+  };
+
+  const toggleDoc = (id: string) =>
+    setSelectedDocIds(prev => (prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]));
+
+  const handleExtraFiles = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const picked = Array.from(e.target.files || []);
+    if (picked.length) setExtraFiles(prev => [...prev, ...picked]);
+    e.target.value = ''; // allow re-picking the same file
+  };
+
   // ─── Data Fetching ────────────────────────────────────────
 
   const loadTemplates = async () => {
@@ -308,25 +415,37 @@ const CommunicationHub: React.FC = () => {
     setComposedEmailContent(template.email_content || template.body || '');
     setComposerTab('compose');
 
+    // Switching templates always starts the document picker from scratch
+    resetDocComposer();
+
     // If we arrived with a quick-action recipient, automatically send this template as an email
+    // (never for the documents template - the user must choose the attachments first)
     if (pendingAutoSend) {
-      // defer slightly to allow state to settle
-      setTimeout(() => {
-        (async () => {
-          try {
-            await handleSend('Email');
-          } catch (e) {
-            console.error('Auto-send failed:', e);
-          }
-        })();
-      }, 300);
+      if (template.id !== DOCUMENT_TEMPLATE_ID) {
+        // defer slightly to allow state to settle
+        setTimeout(() => {
+          (async () => {
+            try {
+              await handleSend('Email');
+            } catch (e) {
+              console.error('Auto-send failed:', e);
+            }
+          })();
+        }, 300);
+      }
       setPendingAutoSend(false);
     }
   };
 
-  const filteredTemplates = selectedCategory === 'All'
+  const filteredDbTemplates = selectedCategory === 'All'
     ? dbTemplates
     : dbTemplates.filter(t => t.category === selectedCategory);
+
+  // The built-in documents template is pinned first under "All" and "Patient"
+  const showDocumentTemplate = selectedCategory === 'All' || selectedCategory === 'Patient';
+  const filteredTemplates = showDocumentTemplate
+    ? [DOCUMENT_TEMPLATE, ...filteredDbTemplates]
+    : filteredDbTemplates;
 
   // ─── Recipient Suggestion Handlers ───────────────────────
 
@@ -335,16 +454,16 @@ const CommunicationHub: React.FC = () => {
     setRecipient(contactVal);
     // Auto-replace {{recipient_name}} and {{patient_name}}
     if (profile.full_name) {
-      setComposedEmailContent(prev =>
-        prev
-          .replace(/\{\{recipient_name\}\}/g, profile.full_name)
-          .replace(/\{\{patient_name\}\}/g, profile.full_name)
-      );
-      setComposedSubject(prev =>
-        prev
-          .replace(/\{\{recipient_name\}\}/g, profile.full_name)
-          .replace(/\{\{patient_name\}\}/g, profile.full_name)
-      );
+      // In documents mode the recipient (e.g. a doctor) is NOT the patient, so only
+      // {{recipient_name}} is replaced; {{patient_name}} comes from the selected patient.
+      const replaceNames = (text: string) => {
+        const withRecipient = text.replace(/\{\{recipient_name\}\}/g, profile.full_name);
+        return isDocumentTemplate
+          ? withRecipient
+          : withRecipient.replace(/\{\{patient_name\}\}/g, profile.full_name);
+      };
+      setComposedEmailContent(replaceNames);
+      setComposedSubject(replaceNames);
     }
     setShowSuggestions(false);
   };
@@ -406,6 +525,21 @@ const CommunicationHub: React.FC = () => {
       return;
     }
 
+    if (isDocumentTemplate) {
+      if (channel !== 'Email') {
+        toast.error('Documents can only be sent by email');
+        return;
+      }
+      if (attachmentCount === 0) {
+        toast.error('Select at least one patient document or upload a file to attach');
+        return;
+      }
+      if (attachmentsTooLarge) {
+        toast.error(`Attachments total ${formatBytes(attachmentBytes)} - the limit is ${formatBytes(MAX_ATTACHMENT_BYTES)}`);
+        return;
+      }
+    }
+
     setIsSending(true);
     let targetEmail  = recipient;
     let targetName   = 'Valued Partner';
@@ -446,16 +580,23 @@ const CommunicationHub: React.FC = () => {
     }
 
     // Build merge variable map
+    const attachedNames = [
+      ...selectedDocs.map(d => d.file_name),
+      ...extraFiles.map(f => f.name),
+    ];
     const mergeVars: Record<string, string> = {
-      patient_name:   targetName,
+      // In documents mode the patient is the person whose files are attached;
+      // the recipient may be the patient, a doctor, a hospital, etc.
+      patient_name:   isDocumentTemplate && docLead?.full_name ? docLead.full_name : targetName,
       recipient_name: targetName,
       doctor_name:    '',
       hospital_name:  '',
       appointment_date: '',
-      case_id:        '',
+      case_id:        isDocumentTemplate ? (docLead?.lead_code || '') : '',
       invoice_number: '',
-      treatment_name: '',
+      treatment_name: isDocumentTemplate ? (docLead?.treatment_interest || '') : '',
       contact_email:  targetEmail,
+      document_list:  attachedNames.map(n => `• ${escapeHtmlText(n)}`).join('\n'),
     };
 
     // Apply merge variables to content
@@ -472,13 +613,44 @@ const CommunicationHub: React.FC = () => {
         masterTemplate: masterTemplateHtmlState || undefined,
       });
 
-      const { success, error } = await sendCrmEmail(targetEmail, finalSubject, htmlEmail, targetName);
+      // Collect attachments (documents template only): stored patient documents + uploaded files
+      let attachments: CrmEmailAttachment[] = [];
+      if (isDocumentTemplate) {
+        try {
+          const stored = await Promise.all(selectedDocs.map(d => fetchEnquiryDocumentAsAttachment(d)));
+          const uploaded: CrmEmailAttachment[] = await Promise.all(
+            extraFiles.map(async f => ({
+              filename: f.name,
+              content_base64: await blobToBase64(f),
+              content_type: f.type || undefined,
+            }))
+          );
+          attachments = [...stored, ...uploaded];
+        } catch (err: any) {
+          toast.error('Could not prepare attachments: ' + (err?.message || err));
+          setIsSending(false);
+          return;
+        }
+      }
+
+      const { success, error } = await sendCrmEmail(
+        targetEmail,
+        finalSubject,
+        htmlEmail,
+        targetName,
+        attachments,
+        { entityId: isDocumentTemplate ? docLead?.id : undefined }
+      );
       if (!success) {
         toast.error('Dispatch Failed: ' + error);
         setIsSending(false);
         return;
       }
-      toast.success('Email dispatched via SMTP ✓');
+      toast.success(
+        attachments.length > 0
+          ? `Email sent with ${attachments.length} attachment${attachments.length === 1 ? '' : 's'} via SMTP ✓`
+          : 'Email dispatched via SMTP ✓'
+      );
     } else {
       const plainText = finalContent.replace(/<[^>]*>?/gm, '');
       const waUrl = `https://wa.me/${targetEmail.replace(/\D/g, '')}?text=${encodeURIComponent(plainText)}`;
@@ -498,6 +670,7 @@ const CommunicationHub: React.FC = () => {
     setIsSending(false);
     setSelectedTemplate(null);
     setRecipient('');
+    resetDocComposer();
   };
 
   // ─── Save New Template ────────────────────────────────────
@@ -664,16 +837,25 @@ const CommunicationHub: React.FC = () => {
                     }`}>
                       {template.category}
                     </span>
-                    <button
-                      onClick={(e) => handleDeleteTemplate(template.id, e)}
-                      className={`p-1 rounded-lg transition-colors ${
-                        selectedTemplate?.id === template.id
-                          ? 'text-white/50 hover:text-white hover:bg-white/10'
-                          : 'text-slate-200 hover:text-red-500'
-                      }`}
-                    >
-                      <Trash2 size={12} />
-                    </button>
+                    {template.id === DOCUMENT_TEMPLATE_ID ? (
+                      <span
+                        title="Sends email with attachments"
+                        className={`p-1 ${selectedTemplate?.id === template.id ? 'text-white/70' : 'text-teal-500'}`}
+                      >
+                        <Paperclip size={12} />
+                      </span>
+                    ) : (
+                      <button
+                        onClick={(e) => handleDeleteTemplate(template.id, e)}
+                        className={`p-1 rounded-lg transition-colors ${
+                          selectedTemplate?.id === template.id
+                            ? 'text-white/50 hover:text-white hover:bg-white/10'
+                            : 'text-slate-200 hover:text-red-500'
+                        }`}
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    )}
                   </div>
                   <h4 className={`text-xs font-black mb-1 leading-tight ${
                     selectedTemplate?.id === template.id ? 'text-white' : 'text-slate-800 group-hover:text-indigo-600'
@@ -820,6 +1002,167 @@ const CommunicationHub: React.FC = () => {
                     </div>
                   </div>
 
+                  {/* Patient / Medical Documents picker (documents template only) */}
+                  {isDocumentTemplate && (
+                    <div className="space-y-3 p-4 bg-teal-50/50 border border-teal-100 rounded-3xl">
+                      <div className="flex items-center justify-between">
+                        <label className="text-[9px] font-black text-teal-700 uppercase tracking-widest flex items-center gap-1.5">
+                          <Paperclip size={11} /> Patient / Medical Documents
+                        </label>
+                        <span className={`text-[9px] font-black uppercase tracking-widest ${attachmentsTooLarge ? 'text-red-500' : 'text-slate-400'}`}>
+                          {attachmentCount} file{attachmentCount === 1 ? '' : 's'} · {formatBytes(attachmentBytes)} / {formatBytes(MAX_ATTACHMENT_BYTES)}
+                        </span>
+                      </div>
+
+                      {/* Patient search */}
+                      {!docLead ? (
+                        <div className="relative">
+                          <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
+                          <input
+                            type="text"
+                            placeholder="Search patient by name, email or lead code..."
+                            className="w-full pl-9 pr-8 py-3 bg-white border border-teal-100 rounded-2xl text-xs outline-none focus:ring-4 focus:ring-teal-500/10 font-bold text-slate-700 transition-all"
+                            value={docLeadQuery}
+                            onChange={e => setDocLeadQuery(e.target.value)}
+                          />
+                          {isSearchingDocLead && (
+                            <Loader2 size={12} className="absolute right-3 top-1/2 -translate-y-1/2 text-teal-500 animate-spin" />
+                          )}
+                          {docLeadResults.length > 0 && (
+                            <div className="absolute left-0 right-0 mt-1 bg-white border border-slate-100 rounded-2xl shadow-xl z-40 overflow-hidden">
+                              {docLeadResults.map(l => (
+                                <button
+                                  key={l.id}
+                                  type="button"
+                                  onClick={() => handlePickDocLead(l)}
+                                  className="w-full px-4 py-2.5 text-left hover:bg-teal-50/60 border-b border-slate-50 last:border-0 transition-colors"
+                                >
+                                  <span className="text-xs font-black text-slate-800 block">
+                                    {l.full_name || 'Unnamed patient'}{l.lead_code ? ` · ${l.lead_code}` : ''}
+                                  </span>
+                                  <span className="text-[10px] text-slate-400">
+                                    {l.email || 'No email'} · {l.patient_documents.length} document{l.patient_documents.length === 1 ? '' : 's'}
+                                  </span>
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="flex items-center justify-between gap-2 p-3 bg-white border border-teal-100 rounded-2xl">
+                          <div className="min-w-0">
+                            <p className="text-xs font-black text-slate-800 truncate">
+                              {docLead.full_name || 'Unnamed patient'}{docLead.lead_code ? ` · ${docLead.lead_code}` : ''}
+                            </p>
+                            <p className="text-[10px] text-slate-400 truncate">{docLead.email || 'No email on file'}</p>
+                          </div>
+                          <div className="flex items-center gap-2 flex-shrink-0">
+                            {docLead.email && (
+                              <button
+                                type="button"
+                                onClick={() => setRecipient(docLead.email as string)}
+                                className="px-3 py-1.5 bg-teal-50 text-teal-700 border border-teal-100 rounded-xl text-[9px] font-black uppercase tracking-widest hover:bg-teal-100 transition-all"
+                              >
+                                Send to patient
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => { setDocLead(null); setSelectedDocIds([]); }}
+                              className="p-1.5 text-slate-400 hover:text-red-500 transition-colors"
+                              title="Choose a different patient"
+                            >
+                              <X size={14} />
+                            </button>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Stored documents of the chosen patient */}
+                      {docLead && (
+                        docLead.patient_documents.length === 0 ? (
+                          <p className="text-[10px] font-bold text-slate-400 px-1">
+                            This patient has no uploaded documents. You can still upload files below.
+                          </p>
+                        ) : (
+                          <div className="space-y-1.5">
+                            <div className="flex items-center justify-between px-1">
+                              <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Uploaded documents</span>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setSelectedDocIds(
+                                    selectedDocIds.length === docLead.patient_documents.length
+                                      ? []
+                                      : docLead.patient_documents.map(d => d.id)
+                                  )
+                                }
+                                className="text-[9px] font-black text-teal-600 uppercase tracking-widest hover:underline"
+                              >
+                                {selectedDocIds.length === docLead.patient_documents.length ? 'Clear all' : 'Select all'}
+                              </button>
+                            </div>
+                            <div className="max-h-48 overflow-y-auto space-y-1.5 pr-1">
+                              {docLead.patient_documents.map(d => (
+                                <label
+                                  key={d.id}
+                                  className={`flex items-center gap-3 p-2.5 rounded-xl border cursor-pointer transition-all ${
+                                    selectedDocIds.includes(d.id)
+                                      ? 'bg-white border-teal-300'
+                                      : 'bg-white/60 border-slate-100 hover:border-teal-200'
+                                  }`}
+                                >
+                                  <input
+                                    type="checkbox"
+                                    checked={selectedDocIds.includes(d.id)}
+                                    onChange={() => toggleDoc(d.id)}
+                                    className="accent-teal-600"
+                                  />
+                                  <FileText size={14} className="text-slate-400 flex-shrink-0" />
+                                  <span className="flex-1 min-w-0 text-[11px] font-bold text-slate-700 truncate">{d.file_name}</span>
+                                  {d.verification_result && (
+                                    <span className="text-[8px] font-black uppercase tracking-tighter px-1.5 py-0.5 rounded-md bg-slate-100 text-slate-500">
+                                      {d.verification_result}
+                                    </span>
+                                  )}
+                                  <span className="text-[9px] font-bold text-slate-400 flex-shrink-0">{formatBytes(d.file_size)}</span>
+                                </label>
+                              ))}
+                            </div>
+                          </div>
+                        )
+                      )}
+
+                      {/* Extra files from this computer */}
+                      <div className="space-y-1.5">
+                        <label className="flex items-center justify-center gap-2 px-4 py-2.5 bg-white border-2 border-dashed border-teal-200 rounded-2xl text-[10px] font-black text-teal-700 uppercase tracking-widest cursor-pointer hover:bg-teal-50 transition-all">
+                          <Upload size={12} /> Upload additional files
+                          <input type="file" multiple accept={ACCEPTED_UPLOADS} className="hidden" onChange={handleExtraFiles} />
+                        </label>
+                        {extraFiles.map((f, i) => (
+                          <div key={`${f.name}-${i}`} className="flex items-center gap-3 p-2.5 bg-white border border-slate-100 rounded-xl">
+                            <Paperclip size={13} className="text-slate-400 flex-shrink-0" />
+                            <span className="flex-1 min-w-0 text-[11px] font-bold text-slate-700 truncate">{f.name}</span>
+                            <span className="text-[9px] font-bold text-slate-400 flex-shrink-0">{formatBytes(f.size)}</span>
+                            <button
+                              type="button"
+                              onClick={() => setExtraFiles(prev => prev.filter((_, idx) => idx !== i))}
+                              className="p-1 text-slate-300 hover:text-red-500 transition-colors"
+                            >
+                              <X size={12} />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+
+                      {attachmentsTooLarge && (
+                        <p className="text-[10px] font-black text-red-500 px-1">
+                          Attachments exceed {formatBytes(MAX_ATTACHMENT_BYTES)}. Deselect some files to send.
+                        </p>
+                      )}
+                    </div>
+                  )}
+
                   {/* Email Title */}
                   <div className="space-y-1">
                     <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest pl-1 flex items-center gap-1.5">
@@ -895,20 +1238,24 @@ const CommunicationHub: React.FC = () => {
                   <div className="flex flex-col sm:flex-row gap-3 pt-2">
                     <button
                       onClick={() => handleSend('Email')}
-                      disabled={isSending}
+                      disabled={isSending || (isDocumentTemplate && (attachmentCount === 0 || attachmentsTooLarge))}
                       className="flex-1 py-3.5 bg-indigo-600 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest hover:bg-indigo-700 shadow-lg shadow-indigo-500/20 transition-all flex items-center justify-center gap-2 disabled:opacity-60"
                     >
-                      {isSending ? <Loader2 size={14} className="animate-spin" /> : <Mail size={14} />}
-                      Send Branded Email
+                      {isSending ? <Loader2 size={14} className="animate-spin" /> : isDocumentTemplate ? <Paperclip size={14} /> : <Mail size={14} />}
+                      {isDocumentTemplate
+                        ? `Send Email with ${attachmentCount} Document${attachmentCount === 1 ? '' : 's'}`
+                        : 'Send Branded Email'}
                     </button>
-                    <button
-                      onClick={() => handleSend('WhatsApp')}
-                      disabled={isSending}
-                      className="flex-1 py-3.5 bg-green-600 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest hover:bg-green-700 shadow-lg shadow-green-500/20 transition-all flex items-center justify-center gap-2 disabled:opacity-60"
-                    >
-                      {isSending ? <Loader2 size={14} className="animate-spin" /> : <MessageSquare size={14} />}
-                      WhatsApp Dispatch
-                    </button>
+                    {!isDocumentTemplate && (
+                      <button
+                        onClick={() => handleSend('WhatsApp')}
+                        disabled={isSending}
+                        className="flex-1 py-3.5 bg-green-600 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest hover:bg-green-700 shadow-lg shadow-green-500/20 transition-all flex items-center justify-center gap-2 disabled:opacity-60"
+                      >
+                        {isSending ? <Loader2 size={14} className="animate-spin" /> : <MessageSquare size={14} />}
+                        WhatsApp Dispatch
+                      </button>
+                    )}
                   </div>
 
                   {/* Compliance note */}

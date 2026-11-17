@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { fetchB2BLeads, createB2BLead, fetchMedicalLeadAgreements, getAgreementPdfUrl, sendCrmEmail, uploadSignedMou, uploadSignedConsentLetter, getSignedMouUrl, saveMedicalLeadSignedDocumentPath } from '../services/supabase.ts';
+import { fetchB2BLeads, createB2BLead, fetchMedicalLeadAgreements, fetchMedicalLeadConsentLetters, getConsentLetterPdfUrl, getAgreementPdfUrl, sendCrmEmail, uploadSignedMou, uploadSignedConsentLetter, getSignedMouUrl, saveMedicalLeadSignedDocumentPath } from '../services/supabase.ts';
 import * as XLSX from 'xlsx';
 import { LeadStatus } from '../types.ts';
 import { 
@@ -9,7 +9,6 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { CrmRole, getCustomStageAccess } from '../services/roles';
-import { useLeadGrants } from '../services/leadAccess';
 
 type ViewMode = 'TABLE' | 'BOARD';
 
@@ -18,7 +17,7 @@ const Leads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   const stageAccess = getCustomStageAccess(roles, 'medical_leads');
   const canReadMedicalStage = (stageId: number) => !stageAccess || stageAccess.read.has(stageId);
   const canWriteMedicalStage = (stageId: number) =>
-    !isCurrentLeadLocked && (!stageAccess || stageAccess.write.has(stageId));
+    !stageAccess || stageAccess.write.has(stageId);
   const blockReadOnlyMedicalWrite = (stageId: number) => {
     if (canWriteMedicalStage(stageId)) return false;
     toast.error('You have read-only access to this stage.');
@@ -30,10 +29,6 @@ const Leads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   const [viewMode, setViewMode] = useState<ViewMode>('BOARD');
   const [selectedLead, setSelectedLead] = useState<any | null>(null);
 
-  // BDMs can write only to the leads granted to them by the super admin.
-  const { restricted: leadRestricted, isGranted } = useLeadGrants(roles);
-  const isCurrentLeadLocked =
-    leadRestricted && !!selectedLead && !isGranted('medical', selectedLead.id);
   const [showNewPartner, setShowNewPartner] = useState(false);
   const [savingPartner, setSavingPartner] = useState(false);
   const [partnerForm, setPartnerForm] = useState({
@@ -435,6 +430,8 @@ const Leads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
     };
     const [stage3Agreements, setStage3Agreements] = useState<any[]>([]);
     const [stage3AgreementsLoading, setStage3AgreementsLoading] = useState(false);
+    const [stage3Consents, setStage3Consents] = useState<any[]>([]);
+    const [stage3ConsentsLoading, setStage3ConsentsLoading] = useState(false);
     const archiveStorageKey = `medical-lead-archive-${lead.id}`;
     const readArchiveState = () => { try { return JSON.parse(localStorage.getItem(archiveStorageKey) || '{}'); } catch { return {}; } };
     const [archiveState, setArchiveState] = useState<any>(() => readArchiveState());
@@ -489,7 +486,20 @@ const Leads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
         }
         setStage3AgreementsLoading(false);
       };
+      const loadStage3Consents = async () => {
+        setStage3ConsentsLoading(true);
+        const { data, error } = await fetchMedicalLeadConsentLetters(String(lead.id));
+        if (cancelled) return;
+        if (error) {
+          console.error('[Medical Leads] Could not load linked consent letters:', error);
+          setStage3Consents([]);
+        } else {
+          setStage3Consents(data || []);
+        }
+        setStage3ConsentsLoading(false);
+      };
       void loadStage3Agreements();
+      void loadStage3Consents();
       return () => { cancelled = true; };
     }, [lead.id]);
     const stage4StorageKey = `medical-lead-stage4-${lead.id}`;
@@ -619,6 +629,17 @@ const Leads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
       } catch (error: any) {
         console.error('[Medical Leads] Could not open generated MOU:', error);
         toast.error(error?.message || 'Could not open the generated MOU.');
+      }
+    };
+    const openConsentLetterPdf = async (filePath: string) => {
+      try {
+        const { data, error } = await getConsentLetterPdfUrl(filePath);
+        if (error) throw error;
+        if (!data) throw new Error('Supabase did not return a document URL.');
+        window.open(data, '_blank', 'noopener,noreferrer');
+      } catch (error: any) {
+        console.error('[Medical Leads] Could not open consent letter:', error);
+        toast.error(error?.message || 'Could not open the consent letter.');
       }
     };
     const stage3DraftReady = Boolean(stage3.legalName.trim() && stage3.scope.trim() && stage3.responsibilities.trim() && stage3.commercialTerms.trim() && stage3.confidentiality.trim() && stage3.duration.trim() && stage3.termination.trim() && stage3.signatory.trim() && stage3.templateVersion.trim() && stage3.author.trim());
@@ -879,6 +900,31 @@ const Leads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                 </div>
               ) : (
                 <p className="text-sm text-slate-600">No generated MOU is linked to this lead yet. Use “Create MoU for this Lead”; after saving in the Agreement Center, return here to see it.</p>
+              )}
+            </div>
+            <div className="rounded-2xl border border-teal-200 bg-teal-50/50 p-5 space-y-3">
+              <div className="flex items-center justify-between gap-3">
+                <div><h4 className="font-black text-teal-950">Consent Letters for this lead</h4><p className="text-xs text-teal-800 mt-1">Created in the Consent Center and saved in the private consent_letters bucket.</p></div>
+                <span className="rounded-full bg-white px-3 py-1 text-xs font-black text-teal-800">{stage3Consents.length}</span>
+              </div>
+              {stage3ConsentsLoading ? (
+                <p className="text-sm text-slate-500">Loading linked consent letters…</p>
+              ) : stage3Consents.length ? (
+                <div className="space-y-2">
+                  {stage3Consents.map((consent: any) => (
+                    <div key={consent.id} className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-xl border border-teal-100 bg-white p-3">
+                      <div className="min-w-0">
+                        <p className="font-bold text-sm text-slate-900 truncate">{consent.patient_name || 'Consent Letter'} · {consent.consent_type || 'Consent'}</p>
+                        <p className="text-xs text-slate-500">Version {consent.version || 'v1.0'} · {consent.status || 'Draft'} · {consent.created_at ? new Date(consent.created_at).toLocaleDateString() : 'Date unavailable'}{consent.valid_until ? ` · Valid until ${new Date(consent.valid_until).toLocaleDateString()}` : ''}</p>
+                      </div>
+                      {consent.pdf_path ? (
+                        <button type="button" onClick={() => openConsentLetterPdf(consent.pdf_path)} className="inline-flex shrink-0 items-center justify-center gap-2 rounded-lg bg-teal-700 px-4 py-2 text-xs font-black text-white hover:bg-teal-800"><FileText size={14}/> View Consent</button>
+                      ) : <span className="text-xs font-bold text-amber-700">PDF not uploaded</span>}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-sm text-slate-600">No consent letter is linked to this lead yet. Use “Create Consent for this Lead”; after saving in the Consent Center, return here to see it.</p>
               )}
             </div>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3"><div className="rounded-2xl border border-slate-200 bg-slate-50 p-4"><p className="text-xs font-black text-slate-500">MoU Draft</p><p className="mt-1 text-sm font-bold">{stage3DraftReady ? 'Fields complete' : 'Draft incomplete'}</p></div><div className="rounded-2xl border border-slate-200 bg-slate-50 p-4"><p className="text-xs font-black text-slate-500">Approval Gate</p><p className="mt-1 text-sm font-bold">{stage3ApprovalReady ? 'Approved to send' : 'Review required'}</p></div><div className="rounded-2xl border border-slate-200 bg-slate-50 p-4"><p className="text-xs font-black text-slate-500">Contact</p><p className="mt-1 text-sm font-bold break-words">{lead.email || 'No primary email'}</p></div></div>

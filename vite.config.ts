@@ -19,7 +19,7 @@ export default defineConfig(({ mode }) => {
           req.on('end', async () => {
             try {
               const data = JSON.parse(body);
-              const { lead: rawLead, pdf_base64, pdf_filename, to_email, to_name, custom_subject, custom_html } = data;
+              const { lead: rawLead, pdf_base64, pdf_filename, attachments: extraAttachments, to_email, to_name, custom_subject, custom_html } = data;
               const lead = rawLead || {};
 
               const transporter = nodemailer.createTransport({
@@ -138,22 +138,49 @@ export default defineConfig(({ mode }) => {
 
               const recipientEmail = to_email || lead.email;
               if (!recipientEmail) throw new Error('Recipient email is required');
+
+              // Attachments: legacy single PDF (pdf_base64) + any number of files from the
+              // Communication Hub "Send Patient / Medical Documents" template.
+              // Each extra attachment is { filename, content_base64, content_type? }.
+              const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024; // keep well under typical SMTP limits
+              const mailAttachments: any[] = [];
+              let attachmentBytes = 0;
+              if (pdf_base64) {
+                attachmentBytes += Math.floor(String(pdf_base64).length * 0.75);
+                mailAttachments.push({
+                  filename: pdf_filename || 'WaruWenJo_Enquiry_Summary.pdf',
+                  content: pdf_base64,
+                  encoding: 'base64'
+                });
+              }
+              if (Array.isArray(extraAttachments)) {
+                for (const a of extraAttachments) {
+                  if (!a || !a.filename || !a.content_base64) continue;
+                  attachmentBytes += Math.floor(String(a.content_base64).length * 0.75);
+                  mailAttachments.push({
+                    filename: String(a.filename).replace(/[\\/\r\n]/g, '_'),
+                    content: a.content_base64,
+                    encoding: 'base64',
+                    contentType: a.content_type || undefined
+                  });
+                }
+              }
+              if (attachmentBytes > MAX_ATTACHMENT_BYTES) {
+                throw new Error('Attachments are too large (max 20 MB in total). Remove some documents and try again.');
+              }
+
               const mailOptions = {
                 from: '"WaruWenJo Support" <support@waruwenjo.com>',
                 to: recipientEmail,
                 subject: custom_subject || `✅ Enquiry Received — Welcome to WaruWenJo! (Ref: ${refId})`,
                 html: custom_html || defaultHtmlBody,
-                attachments: pdf_base64 ? [{
-                  filename: pdf_filename || 'WaruWenJo_Enquiry_Summary.pdf',
-                  content: pdf_base64,
-                  encoding: 'base64'
-                }] : []
+                attachments: mailAttachments
               };
 
               await transporter.sendMail(mailOptions);
 
               res.setHeader('Content-Type', 'application/json');
-              res.end(JSON.stringify({ success: true }));
+              res.end(JSON.stringify({ success: true, attachments_sent: mailAttachments.length }));
             } catch (error) {
               console.error('Email API Error:', error);
               res.statusCode = 500;

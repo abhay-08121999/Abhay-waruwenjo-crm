@@ -3,7 +3,6 @@ import { getLeadCode } from '../lib/leadCode.ts';
 import { fetchLeads, createLead, updateLeadStatus, updatePatientEnquiry, convertProfileToCase, createConsultationFromEnquiry, fetchActiveDoctors, fetchDoctors, fetchHospitals, updateLeadWorkflow, saveLeadWorkflowState, logAdminActivity, fetchAdminActivityLogs, sendCrmEmail, fetchEnquiryDocuments, createPatientAccountFromEnquiry, uploadEnquiryDocument, fetchCrmUsersByRole } from '../services/supabase.ts';
 import { supabase } from '../integrations/supabase/client';
 import { fetchInHouseDoctorUsers, InHouseDoctorUser, CrmRole, getCustomStageAccess } from '../services/roles';
-import { useLeadGrants } from '../services/leadAccess';
 import { LeadStatus, Lead, Doctor, Hospital } from '../types.ts';
 import { 
   Search, Filter, MoreVertical, Mail, Phone, Plus, X, Activity, UserPlus, 
@@ -168,7 +167,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
     (!isInHouseDoctorOnly || IN_HOUSE_DOCTOR_STAGES.includes(stageId)) &&
     (!customStageAccess || customStageAccess.read.has(stageId));
   const canWriteStage = (stageId: number) =>
-    !isCurrentLeadLocked && (!customStageAccess || customStageAccess.write.has(stageId));
+    !customStageAccess || customStageAccess.write.has(stageId);
   const blockReadOnlyWrite = (stageId: number) => {
     if (canWriteStage(stageId)) return false;
     toast.error('You have read-only access to this stage.');
@@ -196,10 +195,6 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   
   const [selectedLead, setSelectedLead] = useState<Lead | null>(null);
 
-  // BDMs can write only to the leads granted to them by the super admin.
-  const { restricted: leadRestricted, isGranted } = useLeadGrants(roles);
-  const isCurrentLeadLocked =
-    leadRestricted && !!selectedLead && !isGranted('patient', selectedLead.id);
   const [selectedDoctorId, setSelectedDoctorId] = useState('');
   const [newLead, setNewLead] = useState<Partial<Lead>>({
     status: LeadStatus.NEW,

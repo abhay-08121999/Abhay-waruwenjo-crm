@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState } from 'react';
-import LeadAccessManager from './LeadAccessManager';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -736,9 +735,6 @@ const CrmUserManagement = () => {
           Refresh
         </Button>
       </div>
-
-      {/* BDM LEAD ACCESS */}
-      <LeadAccessManager />
 
       {/* CREATE USER + CUSTOM ROLE MANAGEMENT */}
       <div className="grid xl:grid-cols-2 gap-6 items-start">

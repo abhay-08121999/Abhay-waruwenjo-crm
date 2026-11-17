@@ -1486,11 +1486,20 @@ export const updateMasterTemplate = async (htmlTemplate: string) => {
 // EMAIL DISPATCH
 // ============================================
 
+export interface CrmEmailAttachment {
+  filename: string;
+  /** Raw base64 (no data: prefix) */
+  content_base64: string;
+  content_type?: string;
+}
+
 export const sendCrmEmail = async (
   toEmail: string,
   subject: string,
   htmlContent: string,
-  toName = 'Valued Partner'
+  toName = 'Valued Partner',
+  attachments: CrmEmailAttachment[] = [],
+  logMeta?: { entityId?: string }
 ) => {
   try {
     // Use the same SMTP API route as the existing working welcome-email flow.
@@ -1502,6 +1511,7 @@ export const sendCrmEmail = async (
         to_name: toName,
         custom_subject: subject,
         custom_html: htmlContent,
+        ...(attachments.length > 0 ? { attachments } : {}),
       }),
     });
 
@@ -1519,14 +1529,17 @@ export const sendCrmEmail = async (
       return { success: false, error: message };
     }
 
-    // Log the communication
+    // Log the communication (attachment names only - never the file contents)
+    const attachmentNote = attachments.length > 0
+      ? `\n<!-- Attachments: ${attachments.map(a => a.filename).join(', ')} -->`
+      : '';
     await logCrmCommunication({
       entity_type: 'Outreach',
-      entity_id: '00000000-0000-0000-0000-000000000000', // Generic outreach
+      entity_id: logMeta?.entityId || '00000000-0000-0000-0000-000000000000', // Generic outreach unless a lead is given
       channel: 'Email',
       direction: 'Outbound',
       subject,
-      content: htmlContent,
+      content: htmlContent + attachmentNote,
       status: 'sent'
     });
 
@@ -1535,6 +1548,80 @@ export const sendCrmEmail = async (
     console.error('sendCrmEmail catch error:', err);
     return { success: false, error: err.message || String(err) };
   }
+};
+
+// ============================================
+// PATIENT / MEDICAL DOCUMENTS FOR EMAIL
+// ============================================
+
+export interface PatientLeadWithDocuments {
+  id: string;
+  full_name: string | null;
+  email: string | null;
+  lead_code: string | null;
+  treatment_interest: string | null;
+  patient_documents: PatientEnquiryDocument[];
+}
+
+/** Search patient enquiries (leads) by name, email or lead code and return their uploaded documents. */
+export const searchPatientLeadsWithDocuments = async (query: string) => {
+  // Strip characters that have a special meaning inside a PostgREST .or() filter.
+  const q = query.trim().replace(/[,%()*"'\\]/g, ' ').trim();
+  if (q.length < 2) return { data: [] as PatientLeadWithDocuments[], error: null };
+
+  const { data, error } = await supabase
+    .from('patient_enquiries')
+    .select('id, full_name, email, lead_code, treatment_interest, patient_documents')
+    .or(`full_name.ilike.%${q}%,email.ilike.%${q}%,lead_code.ilike.%${q}%`)
+    .limit(8);
+
+  if (error) return { data: [] as PatientLeadWithDocuments[], error };
+
+  const leads: PatientLeadWithDocuments[] = (data || []).map((row: any) => ({
+    id: row.id,
+    full_name: row.full_name ?? null,
+    email: row.email ?? null,
+    lead_code: row.lead_code ?? null,
+    treatment_interest: row.treatment_interest ?? null,
+    patient_documents: (Array.isArray(row.patient_documents) ? row.patient_documents : [])
+      .filter((d: any) => d && d.id && d.file_name)
+      .sort((a: any, b: any) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime()),
+  }));
+  return { data: leads, error: null };
+};
+
+/** Convert a Blob/File to raw base64 (no data: prefix). */
+export const blobToBase64 = (blob: Blob): Promise<string> =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || '').split(',')[1] || '');
+    reader.onerror = () => reject(reader.error || new Error('Could not read file'));
+    reader.readAsDataURL(blob);
+  });
+
+/** Download one stored patient document and return it as an email attachment. */
+export const fetchEnquiryDocumentAsAttachment = async (
+  doc: PatientEnquiryDocument
+): Promise<CrmEmailAttachment> => {
+  let blob: Blob | null = null;
+
+  // 1) Authenticated storage download (works for private or public buckets with a read policy)
+  if (doc.file_path) {
+    const { data } = await supabase.storage.from('Enquiry_docs').download(doc.file_path);
+    if (data) blob = data;
+  }
+  // 2) Fallback to the stored public URL
+  if (!blob && doc.file_url) {
+    const res = await fetch(doc.file_url);
+    if (res.ok) blob = await res.blob();
+  }
+  if (!blob) throw new Error(`Could not download "${doc.file_name}"`);
+
+  return {
+    filename: doc.file_name,
+    content_base64: await blobToBase64(blob),
+    content_type: doc.mime_type || blob.type || undefined,
+  };
 };
 
 export const logCrmCommunication = async (log: any) => {
@@ -1579,6 +1666,29 @@ export const fetchMedicalLeadAgreements = async (leadId: string) => {
     .order('created_at', { ascending: false });
   if (error) console.error('[agreements] Could not fetch Medical Lead agreements:', error);
   return { data, error };
+};
+
+/** Fetch consent letters created for one Medical Lead (requires consent_letters.source_lead_id). */
+export const fetchMedicalLeadConsentLetters = async (leadId: string) => {
+  const normalizedLeadId = String(leadId || '').trim();
+  if (!normalizedLeadId) return { data: [], error: new Error('Medical Lead ID is required.') };
+  const { data, error } = await (supabase as any)
+    .from('consent_letters')
+    .select('*')
+    .eq('source_lead_id', normalizedLeadId)
+    .order('created_at', { ascending: false });
+  if (error) console.error('[consent_letters] Could not fetch Medical Lead consent letters:', error);
+  return { data: data as any[] | null, error };
+};
+
+/** Short-lived signed URL for a consent letter PDF in the private `consent_letters` bucket. */
+export const getConsentLetterPdfUrl = async (filePath: string) => {
+  const normalizedPath = String(filePath || '').trim();
+  if (!normalizedPath) return { data: null, error: new Error('Consent letter PDF path is missing.') };
+  const { data, error } = await supabase.storage
+    .from('consent_letters')
+    .createSignedUrl(normalizedPath, 60 * 10);
+  return { data: data?.signedUrl || null, error };
 };
 
 // Keep this payload aligned with the current public.agreements table:
