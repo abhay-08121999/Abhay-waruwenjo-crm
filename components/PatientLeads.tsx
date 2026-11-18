@@ -1,9 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { getLeadCode } from '../lib/leadCode.ts';
-import { fetchLeads, createLead, updateLeadStatus, updatePatientEnquiry, convertProfileToCase, createConsultationFromEnquiry, fetchActiveDoctors, fetchDoctors, fetchHospitals, updateLeadWorkflow, saveLeadWorkflowState, logAdminActivity, fetchAdminActivityLogs, sendCrmEmail, fetchEnquiryDocuments, createPatientAccountFromEnquiry, uploadEnquiryDocument, fetchCrmUsersByRole } from '../services/supabase.ts';
+import { fetchLeads, createLead, updateLeadStatus, updatePatientEnquiry, convertProfileToCase, createConsultationFromEnquiry, fetchActiveDoctors, fetchDoctors, fetchHospitals, updateLeadWorkflow, saveLeadWorkflowState, logAdminActivity, fetchAdminActivityLogs, sendCrmEmail, fetchEnquiryDocuments, createPatientAccountFromEnquiry, uploadEnquiryDocument, fetchCrmUsersByRole, fetchMasterTemplate } from '../services/supabase.ts';
 import { supabase } from '../integrations/supabase/client';
 import { fetchInHouseDoctorUsers, InHouseDoctorUser, CrmRole, getCustomStageAccess } from '../services/roles';
 import { LeadStatus, Lead, Doctor, Hospital } from '../types.ts';
+import { buildWaruWenJoEmailFull } from './emailTemplate';
+import { fillLeadEmailTemplate, buildPatientLink, LEAD_EMAIL_LOG_LABELS, type LeadEmailKind } from '../lib/leadEmailDraft';
 import { 
   Search, Filter, MoreVertical, Mail, Phone, Plus, X, Activity, UserPlus, 
   Calendar, MapPin, Globe, CreditCard, Clock, MessageSquare, CheckCircle2, 
@@ -12,7 +14,6 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { generateCallSummary } from '../services/geminiService.ts';
-import LeadQuotationPanel from './LeadQuotationPanel';
 import { VIL_FILE_ITEMS, VIL_TEXT_ITEMS } from './VilPublicForm';
 
 class LeadDetailErrorBoundary extends React.Component<{ children: React.ReactNode; onClose: () => void }, { hasError: boolean }> {
@@ -48,94 +49,6 @@ const escapeEmailHtml = (value: string) => String(value || '')
   .replace(/</g, '&lt;')
   .replace(/>/g, '&gt;')
   .replace(/"/g, '&quot;');
-
-// Medical assessment email sent from Stage 4 (In-House Doctor Interaction).
-// Table-based layout with inline styles so it renders consistently in Gmail, Outlook and mobile mail apps.
-const buildMedicalAssessmentEmailHtml = (patientName: string, doctorName: string) => {
-  const patient = escapeEmailHtml(patientName || 'Patient');
-  const doctor = escapeEmailHtml(doctorName || 'our In-House Doctor');
-  const steps = [
-    { title: 'Medical review', text: `${doctor} is carefully reviewing the reports and information you shared.` },
-    { title: 'Personal assessment', text: 'You will receive a clear assessment of your condition and the treatment options available.' },
-    { title: 'Recommended care plan', text: 'We will propose the right hospital, specialist and procedure, along with a transparent quotation.' },
-  ];
-  const stepRows = steps.map((step, index) => `
-              <tr>
-                <td width="44" valign="top" style="padding:0 0 18px 0;">
-                  <div style="width:32px;height:32px;line-height:32px;border-radius:16px;background:#0d7a6e;color:#ffffff;font-size:14px;font-weight:700;text-align:center;font-family:Arial,Helvetica,sans-serif;">${index + 1}</div>
-                </td>
-                <td valign="top" style="padding:0 0 18px 0;font-family:Arial,Helvetica,sans-serif;">
-                  <div style="font-size:15px;font-weight:700;color:#0f172a;line-height:1.3;">${step.title}</div>
-                  <div style="font-size:14px;color:#475569;line-height:1.6;margin-top:3px;">${step.text}</div>
-                </td>
-              </tr>`).join('');
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Your personal medical assessment</title>
-</head>
-<body style="margin:0;padding:0;background:#eef4f3;">
-<div style="display:none;max-height:0;overflow:hidden;opacity:0;color:#eef4f3;">${doctor} is personally reviewing your medical information.</div>
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#eef4f3;">
-  <tr>
-    <td align="center" style="padding:32px 14px;">
-      <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:600px;background:#ffffff;border-radius:20px;overflow:hidden;box-shadow:0 8px 30px rgba(15,23,42,0.08);">
-        <tr>
-          <td align="center" style="background:#0d7a6e;background-image:linear-gradient(135deg,#0a5f55 0%,#0d7a6e 55%,#17a392 100%);padding:40px 32px 36px 32px;">
-            <div style="font-family:Arial,Helvetica,sans-serif;font-size:12px;font-weight:700;letter-spacing:3px;color:#b8efe6;text-transform:uppercase;">WaruWenJo Healthcare</div>
-            <div style="width:46px;height:3px;background:#ffffff;opacity:0.7;border-radius:2px;margin:14px auto 18px auto;"></div>
-            <h1 style="margin:0;font-family:Georgia,'Times New Roman',serif;font-size:28px;line-height:1.25;color:#ffffff;font-weight:700;">Your personal medical assessment is in progress</h1>
-            <p style="margin:12px 0 0 0;font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:1.6;color:#d6f5f0;">A dedicated doctor is looking after your case.</p>
-          </td>
-        </tr>
-        <tr>
-          <td style="padding:34px 36px 8px 36px;font-family:Arial,Helvetica,sans-serif;">
-            <p style="margin:0 0 14px 0;font-size:17px;font-weight:700;color:#0f172a;">Dear ${patient},</p>
-            <p style="margin:0;font-size:15px;line-height:1.75;color:#334155;">Thank you for trusting WaruWenJo with your care. <strong style="color:#0d7a6e;">${doctor}</strong> has reviewed your medical information and will guide you through the next steps of your treatment journey.</p>
-          </td>
-        </tr>
-        <tr>
-          <td style="padding:22px 36px 6px 36px;">
-            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f0faf8;border:1px solid #cdeee8;border-radius:14px;">
-              <tr>
-                <td style="padding:22px 22px 6px 22px;">
-                  <div style="font-family:Arial,Helvetica,sans-serif;font-size:11px;font-weight:700;letter-spacing:2px;color:#0d7a6e;text-transform:uppercase;margin-bottom:16px;">What happens next</div>
-                  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">${stepRows}
-                  </table>
-                </td>
-              </tr>
-            </table>
-          </td>
-        </tr>
-        <tr>
-          <td style="padding:20px 36px 8px 36px;font-family:Arial,Helvetica,sans-serif;">
-            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-left:4px solid #0d7a6e;background:#f8fafc;border-radius:0 10px 10px 0;">
-              <tr>
-                <td style="padding:14px 18px;font-size:14px;line-height:1.7;color:#475569;">Our team will contact you shortly with the assessment and recommendations. If you have new reports or any questions in the meantime, simply reply to this email and we will be happy to help.</td>
-              </tr>
-            </table>
-          </td>
-        </tr>
-        <tr>
-          <td style="padding:24px 36px 36px 36px;font-family:Arial,Helvetica,sans-serif;">
-            <p style="margin:0;font-size:15px;line-height:1.7;color:#334155;">Warm regards,<br><strong style="color:#0f172a;">The WaruWenJo Clinical Team</strong><br><span style="font-size:13px;color:#64748b;">Medical Tourism &amp; Patient Care</span></p>
-          </td>
-        </tr>
-        <tr>
-          <td align="center" style="background:#0f172a;padding:22px 30px;font-family:Arial,Helvetica,sans-serif;">
-            <div style="font-size:13px;font-weight:700;color:#ffffff;letter-spacing:1px;">WaruWenJo Healthcare</div>
-            <div style="font-size:12px;line-height:1.6;color:#94a3b8;margin-top:6px;">Your trusted medical tourism partner.<br>This message was sent to you regarding your medical enquiry.</div>
-          </td>
-        </tr>
-      </table>
-    </td>
-  </tr>
-</table>
-</body>
-</html>`;
-};
 
 const MOM_FIELDS: [string, string][] = [
   ['mom_date_time', 'Date / time'],
@@ -459,6 +372,8 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
         ])
       );
       Object.assign(hydratedState, normalizedStageChecklists);
+      const assignedInHouseName = inHouseDoctors.find((d) => d.userId === selectedLead.assignedTo)?.name;
+      if (assignedInHouseName) hydratedState.assigned_doctor_name = assignedInHouseName;
       setLocalWorkflowState(hydratedState);
       workflowStateRef.current = hydratedState;
       workflowSaveQueueRef.current = Promise.resolve();
@@ -1312,6 +1227,57 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
     toast.success(bdmId ? `Assigned to ${bdmNameFor(bdmId)}` : 'BDM unassigned');
   };
 
+  // ── Sends a lead email from the shared template, then logs it ──
+  type LeadEmailResult = { success: true; sentAt: string } | { success: false };
+  const sendLeadTemplateEmail = async (kind: LeadEmailKind, variables: Record<string, string>): Promise<LeadEmailResult> => {
+    if (!selectedLead?.email) {
+      toast.error('No patient email is saved for this lead.');
+      return { success: false };
+    }
+    const email = fillLeadEmailTemplate(kind, variables);
+    const { data: masterTemplate } = await fetchMasterTemplate();
+    const html = buildWaruWenJoEmailFull({
+      emailTitle: email.title,
+      emailSubtitle: email.subtitle,
+      emailContent: email.content,
+      masterTemplate: masterTemplate || undefined,
+    });
+    const result = await sendCrmEmail(selectedLead.email, email.subject, html, selectedLead.name || 'Patient');
+    if (!result?.success) {
+      toast.error(result?.error || 'Email could not be sent');
+      return { success: false };
+    }
+    const sentAt = new Date().toISOString();
+    await logAdminActivity(LEAD_EMAIL_LOG_LABELS[kind], 'Patient Lead', selectedLead.id, { email: selectedLead.email, sent_at: sentAt });
+    loadActivityLogs(selectedLead.id);
+    return { success: true, sentAt };
+  };
+
+  // ── In-house doctor ownership (assigned from the lead list or lead header) ──
+  const inHouseIdFor = (lead: any): string => {
+    const value = leads.find((l) => l.id === lead.id)?.assignedTo ?? lead.assignedTo ?? '';
+    return inHouseDoctors.some((d) => d.userId === value) ? value : '';
+  };
+  const inHouseNameFor = (lead: any) =>
+    inHouseDoctors.find((d) => d.userId === inHouseIdFor(lead))?.name || 'Unassigned';
+
+  const handleAssignInHouseDoctor = async (leadId: string, doctorUserId: string | null) => {
+    const doctorName = inHouseDoctors.find((d) => d.userId === doctorUserId)?.name || '';
+    const { error } = await updatePatientEnquiry(leadId, { assigned_to: doctorUserId });
+    if (error) {
+      toast.error(`Could not assign in-house doctor: ${error.message}`);
+      return;
+    }
+    setLeads((prev) => prev.map((l) => (l.id === leadId ? { ...l, assignedTo: doctorUserId ?? undefined } : l)));
+    if (selectedLead?.id === leadId) {
+      setSelectedInHouseDoctor(doctorName);
+      await persistWorkflowPatch({ assigned_doctor_name: doctorName });
+    }
+    await logAdminActivity('In-House Doctor Assigned', 'Patient Lead', leadId, { doctor_id: doctorUserId, doctor_name: doctorName || null });
+    loadActivityLogs(leadId);
+    toast.success(doctorName ? `Lead assigned to ${doctorName}` : 'In-house doctor unassigned');
+  };
+
   // Patient's quotation choice lives in patient_enquiries columns. It is kept in its own state map
   // so refreshing it never resets unsaved edits in the stage form.
   type QuotationChoiceInfo = { quotationChoice: any; selectedQuotationNo: number | null; selectedQuotationAt: string | null };
@@ -1363,16 +1329,6 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
     await logAdminActivity('Patient Quotation Selected', 'Patient Lead', selectedLead.id, { quotation: quotation.label });
     loadActivityLogs(selectedLead.id);
     toast.success(`${quotation.label} recorded as the patient's choice`);
-  };
-
-  const handleQuotationOptionsSent = async ({ token }: { token: string; sentAt: string }) => {
-    if (!selectedLead) return;
-    await refreshQuotationChoice(selectedLead.id);
-    await logAdminActivity('Quotation Options Emailed to Patient', 'Patient Lead', selectedLead.id, {
-      email: selectedLead.email,
-      choice_token: token,
-    });
-    loadActivityLogs(selectedLead.id);
   };
 
   // Pick up the patient's choice whenever Stage 6 is opened
@@ -1480,44 +1436,20 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   };
 
   const handleSendVilForm = async () => {
-    if (isSendingVilForm) return;
-    if (!selectedLead?.email) {
-      toast.error('No patient email is saved for this lead.');
-      return;
-    }
+    if (isSendingVilForm || !selectedLead) return;
     setIsSendingVilForm(true);
-    const formLink = `${window.location.origin}${window.location.pathname}#/vil-form/${selectedLead.id}`;
-    const docList = ['Recent colour photograph (2 in × 2 in, JPEG, 10 KB – 1 MB)', 'Medical invitation letter from the Indian hospital', 'Proof of residence', 'Proof of occupation', 'Polio and Yellow Fever vaccination certificate'];
-    const rowStyle = 'padding:8px 0;border-bottom:1px solid #eef2f7;font-size:14px;color:#334155;';
-    const html = `<div style="font-family:Arial,Helvetica,sans-serif;background:#f8fafc;padding:24px;">
-      <div style="max-width:600px;margin:0 auto;background:#ffffff;border-radius:16px;overflow:hidden;border:1px solid #e2e8f0;">
-        <div style="background:#4338ca;padding:24px 28px;color:#ffffff;">
-          <div style="font-size:11px;letter-spacing:2px;text-transform:uppercase;opacity:0.8;">WaruWenJo Medical Tourism</div>
-          <div style="font-size:20px;font-weight:bold;margin-top:6px;">VIL Medical Visa Form</div>
-        </div>
-        <div style="padding:28px;color:#334155;font-size:14px;line-height:1.6;">
-          <p style="margin:0 0 14px;">Dear ${selectedLead.name || 'Patient'},</p>
-          <p style="margin:0 0 14px;">To continue with your medical visa (VIL) application, please complete the form and upload your documents using the secure link below. It takes about 10 minutes.</p>
-          <div style="text-align:center;margin:26px 0;">
-            <a href="${formLink}" style="display:inline-block;background:#4338ca;color:#ffffff;text-decoration:none;font-weight:bold;font-size:14px;padding:14px 28px;border-radius:12px;">Complete the VIL Form</a>
-          </div>
-          <p style="margin:0 0 8px;font-weight:bold;color:#0f172a;">Documents you will need</p>
-          <div style="margin:0 0 18px;">${docList.map(d => `<div style="${rowStyle}">&#10003;&nbsp; ${d}</div>`).join('')}</div>
-          <p style="margin:0 0 14px;background:#eef2ff;border-radius:10px;padding:12px 14px;font-size:13px;color:#3730a3;"><strong>Photo tip:</strong> Use a plain white or light background, face the camera directly, and do not crop your passport photo. Upload a separate photograph.</p>
-          <p style="margin:0 0 14px;font-size:13px;color:#64748b;">If the button does not work, copy and paste this link into your browser:<br/><span style="word-break:break-all;">${formLink}</span></p>
-          <p style="margin:24px 0 0;">Warm regards,<br/><strong>WaruWenJo Medical Tourism Team</strong></p>
-        </div>
-      </div>
-    </div>`;
     try {
-      const result = await sendCrmEmail(selectedLead.email, 'Complete your VIL medical visa form', html, selectedLead.name);
-      if (!result.success) {
-        toast.error(result.error || 'VIL form email failed');
+      const formLink = buildPatientLink(`#/vil-form/${selectedLead.id}`);
+      if (formLink.isLocal) {
+        toast.error("The patient link points to localhost and will not open on the patient's device. Set VITE_PUBLIC_APP_URL in .env to your deployed CRM address, then restart the dev server.");
         return;
       }
-      await persistWorkflowPatch({ vil_form_sent_at: new Date().toISOString() });
-      await logAdminActivity('VIL Form Email Sent', 'Patient Lead', selectedLead.id, { email: selectedLead.email, form_link: formLink });
-      loadActivityLogs(selectedLead.id);
+      const result = await sendLeadTemplateEmail('vil_form', {
+        patient_name: escapeEmailHtml(selectedLead.name || 'Patient'),
+        vil_form_link: formLink.url,
+      });
+      if (!result.success) return;
+      await persistWorkflowPatch({ vil_form_sent_at: result.sentAt });
       toast.success('VIL form email sent to patient');
     } catch (error: any) {
       toast.error(error?.message || 'VIL form email failed');
@@ -1527,29 +1459,21 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   };
 
   const handleSendDocumentRequest = async () => {
-    if (isSendingDocumentRequest) return;
-    if (!selectedLead?.email) {
-      toast.error('No patient email is saved for this lead.');
-      return;
-    }
+    if (isSendingDocumentRequest || !selectedLead) return;
     setIsSendingDocumentRequest(true);
-    const uploadLink = `${window.location.origin}${window.location.pathname}#/patient-documents/${selectedLead.id}`;
-    const requested = ['Passport – personal particulars page', 'National ID card (patient and companion)', 'Medical reports', 'Test results', 'X-rays', 'MRI / CT scans', 'Prescriptions', 'Previous treatment records', 'Other relevant medical documents'];
-    const html = `<p>Dear ${selectedLead.name},</p><p>Please upload the documents needed for your ${selectedLead.treatmentInterest || 'medical enquiry'} review, including your passport and national ID.</p><ul>${requested.map(item => `<li>${item}</li>`).join('')}</ul><p><a href="${uploadLink}" style="display:inline-block;padding:12px 18px;background:#0d7a6e;color:#fff;border-radius:8px;text-decoration:none">Upload medical documents</a></p><p>This secure link is associated with your enquiry. You may upload multiple files.</p><p>Regards,<br/>WaruWenJo Medical Tourism</p>`;
     try {
-      const result = await sendCrmEmail(selectedLead.email, 'Medical documents required for your enquiry', html, selectedLead.name);
-      if (!result.success) {
-        toast.error(result.error || 'Document request email failed');
+      const uploadLink = buildPatientLink(`#/patient-documents/${selectedLead.id}`);
+      if (uploadLink.isLocal) {
+        toast.error("The patient link points to localhost and will not open on the patient's device. Set VITE_PUBLIC_APP_URL in .env to your deployed CRM address, then restart the dev server.");
         return;
       }
-      const sentAt = new Date().toISOString();
-      const processExplained = Boolean(workflowStateRef.current?.process_explained_at);
-      await persistWorkflowPatch({ document_request_sent_at: sentAt });
-      if (processExplained) {
-        await saveStage3Task('Explain Patient Process & Send Medical Document Request Email', { document_request_sent_at: sentAt });
-      }
-      await logAdminActivity('Medical Document Request Email Sent', 'Patient Lead', selectedLead.id, { email: selectedLead.email, upload_link: uploadLink });
-      loadActivityLogs(selectedLead.id);
+      const result = await sendLeadTemplateEmail('document_request', {
+        patient_name: escapeEmailHtml(selectedLead.name || 'Patient'),
+        treatment_name: escapeEmailHtml(selectedLead.treatmentInterest || 'medical enquiry'),
+        upload_link: uploadLink.url,
+      });
+      if (!result.success) return;
+      await persistWorkflowPatch({ document_request_sent_at: result.sentAt });
       toast.success('Document request email sent');
     } catch (error: any) {
       console.error('Stage 3 document request email failed:', error);
@@ -1878,22 +1802,13 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   };
 
   const handleSendPersonalDoctorEmail = async () => {
-    if (!selectedLead?.email) {
-      toast.error('This patient does not have an email address.');
-      return;
-    }
-    const doctorName = localWorkflowState?.assigned_doctor_name || 'the In-House Doctor';
-    const result = await sendCrmEmail(
-      selectedLead.email,
-      'Your personal medical assessment is in progress',
-      buildMedicalAssessmentEmailHtml(selectedLead.name || 'Patient', doctorName),
-      selectedLead.name || 'Patient'
-    );
-    if (result?.error) {
-      toast.error('Personal email could not be sent.');
-      return;
-    }
-    await saveStage4Task('Send Personal Email to Patient', { personal_email_sent_at: new Date().toISOString() });
+    if (!selectedLead) return;
+    const result = await sendLeadTemplateEmail('personal_doctor_email', {
+      patient_name: escapeEmailHtml(selectedLead.name || 'Patient'),
+      doctor_name: escapeEmailHtml(localWorkflowState?.assigned_doctor_name || 'the In-House Doctor'),
+    });
+    if (!result.success) return;
+    await saveStage4Task('Send Personal Email to Patient', { personal_email_sent_at: result.sentAt });
     toast.success('Personal email sent to the patient');
   };
 
@@ -1914,17 +1829,13 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   };
 
   const handleSendClinicalDoctorEmail = async () => {
-    if (!selectedLead?.email) {
-      toast.error('This patient does not have an email address.');
-      return;
-    }
-    const doctorName = localWorkflowState?.assigned_doctor_name || 'Our In-House Doctor';
-    const result = await sendCrmEmail(selectedLead.email, 'Your clinical review and next steps', `<p>Dear ${selectedLead.name || 'Patient'},</p><p>${doctorName} has reviewed your medical information. We will share the recommended hospital, specialist, procedure, and next steps with you.</p><p>Please reply if you have any questions or additional information.</p>`, selectedLead.name || 'Patient');
-    if (result?.error) {
-      toast.error('Clinical email could not be sent.');
-      return;
-    }
-    await persistWorkflowPatch({ clinical_doctor_email_sent_at: new Date().toISOString() });
+    if (!selectedLead) return;
+    const result = await sendLeadTemplateEmail('clinical_doctor_email', {
+      patient_name: escapeEmailHtml(selectedLead.name || 'Patient'),
+      doctor_name: escapeEmailHtml(localWorkflowState?.assigned_doctor_name || 'Our In-House Doctor'),
+    });
+    if (!result.success) return;
+    await persistWorkflowPatch({ clinical_doctor_email_sent_at: result.sentAt });
     toast.success('Personal clinical email sent');
   };
 
@@ -1951,6 +1862,8 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   };
 
   const getLeadOwnerName = (lead: Lead) => {
+    const inHouseOwner = inHouseDoctors.find((d) => d.userId === lead.assignedTo);
+    if (inHouseOwner) return inHouseOwner.name;
     // 1. Prefer the explicitly saved name in workflow state
     if (lead.workflowState?.assigned_doctor_name) {
       return lead.workflowState.assigned_doctor_name;
@@ -3053,13 +2966,6 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                               </span>
                             );
                           }
-                          if (choice.quotationChoice?.sent_at) {
-                            return (
-                              <span className="text-[9px] font-black px-4 py-1.5 rounded-full uppercase tracking-widest border bg-amber-50 text-amber-700 border-amber-200">
-                                Options sent
-                              </span>
-                            );
-                          }
                           return null;
                         })()}
                         {canAssignBdm ? (
@@ -3076,6 +2982,22 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                         ) : (
                           <span className="text-[9px] font-black px-4 py-1.5 rounded-full uppercase tracking-widest border bg-slate-50 text-slate-600 border-slate-200">
                             BDM: {bdmNameFor(bdmIdFor(lead))}
+                          </span>
+                        )}
+                        {canAssignBdm ? (
+                          <select
+                            value={inHouseIdFor(lead)}
+                            onClick={(e) => e.stopPropagation()}
+                            onChange={(e) => handleAssignInHouseDoctor(lead.id, e.target.value || null)}
+                            className="text-[9px] font-black uppercase tracking-widest px-3 py-1.5 rounded-full border border-indigo-200 bg-indigo-50 text-indigo-700"
+                            title="Assigned In-House Doctor"
+                          >
+                            <option value="">Doctor: Unassigned</option>
+                            {inHouseDoctors.map((d) => <option key={d.userId} value={d.userId}>Doctor: {d.name}</option>)}
+                          </select>
+                        ) : (
+                          <span className="text-[9px] font-black px-4 py-1.5 rounded-full uppercase tracking-widest border bg-indigo-50 text-indigo-700 border-indigo-200">
+                            Doctor: {inHouseNameFor(lead)}
                           </span>
                         )}
                       </div>
@@ -3152,6 +3074,22 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                 </select>
               ) : (
                 <span className="text-xs font-black text-slate-700">{bdmNameFor(bdmIdFor(selectedLead))}</span>
+              )}
+            </div>
+
+            <div className="px-10 pt-2 flex items-center gap-3 flex-wrap">
+              <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Assigned In-House Doctor</p>
+              {canAssignBdm ? (
+                <select
+                  value={inHouseIdFor(selectedLead)}
+                  onChange={(e) => handleAssignInHouseDoctor(selectedLead.id, e.target.value || null)}
+                  className="text-xs font-bold border border-indigo-200 rounded-xl px-3 py-2 bg-indigo-50 text-indigo-700"
+                >
+                  <option value="">Unassigned</option>
+                  {inHouseDoctors.map((d) => <option key={d.userId} value={d.userId}>{d.name}</option>)}
+                </select>
+              ) : (
+                <span className="text-xs font-black text-slate-700">{inHouseNameFor(selectedLead)}</span>
               )}
             </div>
 
@@ -3688,17 +3626,6 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
 
                        {activeWorkflowStage === 6 && (
                           <div className="space-y-4">
-                            <LeadQuotationPanel
-                              lead={selectedLead}
-                              selectedQuotationNo={choiceFor(selectedLead).selectedQuotationNo}
-                              selectedQuotationAt={choiceFor(selectedLead).selectedQuotationAt}
-                              optionsSentAt={choiceFor(selectedLead).quotationChoice?.sent_at ?? null}
-                              onSelectQuotation={handleSelectQuotation}
-                              onOptionsSent={handleQuotationOptionsSent}
-                              onRefreshChoice={() => refreshQuotationChoice(selectedLead.id)}
-                              readOnly={isStageReadOnly}
-                            />
-
                             <div className="p-6 bg-slate-50 rounded-[2rem] border border-slate-100">
                                   <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-4 text-center">Patient Decision</p>
                                   <p className="text-xs text-slate-600 font-bold text-center mb-6 px-4">
@@ -4157,7 +4084,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                 </button>
                 <button 
                   onClick={() => setShowConsultationModal(false)}
-                  className="w-full py-4 bg-slate-50 text-slate-400 rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-slate-100 transition-all"
+                  classAName="w-full py-4 bg-slate-50 text-slate-400 rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-slate-100 transition-all"
                 >
                   Cancel
                 </button>

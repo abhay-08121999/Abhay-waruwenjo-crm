@@ -208,6 +208,18 @@ const App: React.FC = () => {
     return <QuotationChoicePage token={decodeURIComponent(quotationChoiceMatch[1])} initialChoice={chooseId} />;
   }
 
+  // Public patient pages: opened from emails, no login. Checked BEFORE the auth gate
+  // so patients never see the CRM loading screen or login page.
+  const patientDocumentMatch = currentHash.match(/^#\/patient-documents\/([^/?]+)/);
+  if (patientDocumentMatch) {
+    return <PatientDocumentUpload leadId={decodeURIComponent(patientDocumentMatch[1])} />;
+  }
+
+  const vilFormMatch = currentHash.match(/^#\/vil-form\/([^/?]+)/);
+  if (vilFormMatch) {
+    return <VilPublicForm leadId={decodeURIComponent(vilFormMatch[1])} />;
+  }
+
   // Show loading while checking auth
   if (isCheckingAuth) {
     return (
@@ -220,16 +232,6 @@ const App: React.FC = () => {
         </div>
       </div>
     );
-  }
-
-  const patientDocumentMatch = currentHash.match(/^#\/patient-documents\/([^/?]+)/);
-  if (patientDocumentMatch) {
-    return <PatientDocumentUpload leadId={decodeURIComponent(patientDocumentMatch[1])} />;
-  }
-
-  const vilFormMatch = currentHash.match(/^#\/vil-form\/([^/?]+)/);
-  if (vilFormMatch) {
-    return <VilPublicForm leadId={decodeURIComponent(vilFormMatch[1])} />;
   }
 
   // Show login page if not authenticated or on login route
