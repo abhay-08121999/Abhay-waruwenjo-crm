@@ -111,9 +111,10 @@ const DEFAULT_PUBLIC_SITE = 'https://admin.waruwenjo.com';
  *   localhost link does not open on a patient's device.
  */
 export const buildPatientLink = (hashRoute: string): { url: string; isLocal: boolean } => {
-  const isLocalHost = (value: string) => /localhost|127\.0\.0\.1/i.test(value);
+  // Same base as the quotation-choice email link (LeadQuotationPanel): the site this CRM is running on,
+  // so the button opens the upload form from the build that sent the email instead of a different deployment.
   const configured = (import.meta.env.VITE_SITE_URL as string | undefined)?.trim();
   const current = `${window.location.origin}${window.location.pathname}`;
-  const base = (configured || (isLocalHost(current) ? DEFAULT_PUBLIC_SITE : current)).replace(/\/+$/, '');
-  return { url: `${base}/${hashRoute}`, isLocal: isLocalHost(base) };
+  const base = (configured || current).replace(/\/+$/, '');
+  return { url: `${base}/${hashRoute}`, isLocal: false };
 };

@@ -48,11 +48,28 @@ const AccessDenied: React.FC = () => (
   </div>
 );
 
+// Patient email links look like  https://<site>/?go=/patient-documents/<leadId>
+// The route lives in the query string (not only in the #hash) because some mail clients and
+// link trackers drop the #fragment, which sent patients to the CRM login instead of the upload box.
+// Old-style  /#/patient-documents/<leadId>  links still work.
+const PUBLIC_PATIENT_ROUTE = /^\/(patient-documents|vil-form|quotation-choice)\/[^\s]+$/;
+const resolveInitialHash = (): string => {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const go = params.get('go');
+    if (go && PUBLIC_PATIENT_ROUTE.test(go)) {
+      params.delete('go');
+      const qs = params.toString();
+      window.history.replaceState(null, '', `${window.location.pathname}${qs ? `?${qs}` : ''}#${go}`);
+      return `#${go}`;
+    }
+  } catch { /* fall through to the normal hash */ }
+  const hash = window.location.hash;
+  return (hash === '' || hash === '#') ? '#/' : hash;
+};
+
 const App: React.FC = () => {
-  const [currentHash, setCurrentHash] = useState(() => {
-    const hash = window.location.hash;
-    return (hash === '' || hash === '#') ? '#/' : hash;
-  });
+  const [currentHash, setCurrentHash] = useState(resolveInitialHash);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [isCheckingAuth, setIsCheckingAuth] = useState(true);
   const [adminUser, setAdminUser] = useState<any>(null);

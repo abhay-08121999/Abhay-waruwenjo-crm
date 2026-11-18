@@ -12,9 +12,10 @@ import {
   LayoutGrid, List, AlertTriangle, ChevronRight, User, Hash, FileText,
   ExternalLink, Info, Stethoscope, ChevronLeft, Pencil
 } from 'lucide-react';
-import { toast } from 'sonner';
+import { toast, Toaster } from 'sonner';
 import { generateCallSummary } from '../services/geminiService.ts';
 import { VIL_FILE_ITEMS, VIL_TEXT_ITEMS } from './VilPublicForm';
+import LeadQuotationPanel from './LeadQuotationPanel';
 
 class LeadDetailErrorBoundary extends React.Component<{ children: React.ReactNode; onClose: () => void }, { hasError: boolean }> {
   state = { hasError: false };
@@ -1329,6 +1330,16 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
     await logAdminActivity('Patient Quotation Selected', 'Patient Lead', selectedLead.id, { quotation: quotation.label });
     loadActivityLogs(selectedLead.id);
     toast.success(`${quotation.label} recorded as the patient's choice`);
+  };
+
+  const handleQuotationOptionsSent = async ({ token }: { token: string; sentAt: string }) => {
+    if (!selectedLead) return;
+    await refreshQuotationChoice(selectedLead.id);
+    await logAdminActivity('Quotation Options Emailed to Patient', 'Patient Lead', selectedLead.id, {
+      email: selectedLead.email,
+      choice_token: token,
+    });
+    loadActivityLogs(selectedLead.id);
   };
 
   // Pick up the patient's choice whenever Stage 6 is opened
@@ -2791,6 +2802,8 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
 
   return (
     <>
+    {/* Patient Leads had no Toaster of its own, so toasts (e.g. the quotation error) were hidden or lost behind the lead detail pane. */}
+    <Toaster richColors closeButton position="top-center" style={{ zIndex: 2147483647 }} toastOptions={{ duration: 6000 }} />
     <div className="space-y-7 pb-10 animate-in fade-in duration-700">
       <div className="flex flex-col md:flex-row md:items-end justify-between gap-6">
         <div>
@@ -3626,6 +3639,17 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
 
                        {activeWorkflowStage === 6 && (
                           <div className="space-y-4">
+                            <LeadQuotationPanel
+                              lead={selectedLead}
+                              selectedQuotationNo={choiceFor(selectedLead).selectedQuotationNo}
+                              selectedQuotationAt={choiceFor(selectedLead).selectedQuotationAt}
+                              optionsSentAt={choiceFor(selectedLead).quotationChoice?.sent_at ?? null}
+                              onSelectQuotation={handleSelectQuotation}
+                              onOptionsSent={handleQuotationOptionsSent}
+                              onRefreshChoice={() => refreshQuotationChoice(selectedLead.id)}
+                              readOnly={isStageReadOnly}
+                            />
+
                             <div className="p-6 bg-slate-50 rounded-[2rem] border border-slate-100">
                                   <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-4 text-center">Patient Decision</p>
                                   <p className="text-xs text-slate-600 font-bold text-center mb-6 px-4">
@@ -3781,7 +3805,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                                 <p className="text-[9px] font-black text-sky-700 uppercase tracking-widest">Step 4c — Visa Application</p>
                                 <label className="flex items-center gap-3 p-3 bg-white rounded-xl border border-sky-100 cursor-pointer">
                                   <input type="checkbox" className="w-4 h-4 accent-sky-600" checked={Boolean(localWorkflowState?.visa_application_sent_at)} disabled={isStageReadOnly} onChange={(e) => handleToggleVisaSent(e.target.checked)} />
-                                  <span className="text-xs font-black text-slate-700">Send visa application</span>
+                                  <span className="text-xs font-black text-slate-700">Send request for visa application</span>
                                   {localWorkflowState?.visa_application_sent_at && <span className="ml-auto text-[10px] font-bold text-slate-400">{new Date(localWorkflowState.visa_application_sent_at).toLocaleString()}</span>}
                                 </label>
                                 <label className="flex items-center gap-3 p-3 bg-white rounded-xl border border-sky-100 cursor-pointer">

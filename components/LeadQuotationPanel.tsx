@@ -202,11 +202,9 @@ const LeadQuotationPanel: React.FC<LeadQuotationPanelProps> = ({
           >
             <RefreshCw size={12} /> Refresh
           </button>
-          {!readOnly && (
-            <button onClick={() => openQuotations()} className={btnPrimary}>
-              <Plus size={12} /> Create Quotation
-            </button>
-          )}
+          <button onClick={() => openQuotations()} className={btnPrimary}>
+            <Plus size={12} /> Create Quotation
+          </button>
         </div>
       </div>
 

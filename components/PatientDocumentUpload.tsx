@@ -10,7 +10,7 @@ const formatSize = (bytes: number) =>
   bytes >= 1024 * 1024 ? `${(bytes / (1024 * 1024)).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
 
 // National ID files are stored with a prefix so the clinical team can tell them apart from medical documents.
-const ID_PREFIXES = { patient: 'NATIONAL_ID_PATIENT__', companion: 'NATIONAL_ID_COMPANION__', passport: 'PASSPORT_PATIENT__' } as const;
+const ID_PREFIXES = { patient: 'NATIONAL_ID_PATIENT__', companion: 'NATIONAL_ID_COMPANION__', passport: 'PASSPORT_PATIENT__', companion_passport: 'PASSPORT_COMPANION__' } as const;
 type NationalIdKind = keyof typeof ID_PREFIXES;
 
 const readFlag = (key: string) => {
@@ -173,6 +173,7 @@ const PatientDocumentUpload: React.FC<{ leadId: string }> = ({ leadId }) => {
   const patientIdKey = `national_id_patient_${leadId}`;
   const companionIdKey = `national_id_companion_${leadId}`;
   const passportKey = `passport_patient_${leadId}`;
+  const companionPassportKey = `passport_companion_${leadId}`;
   const [view, setView] = useState<'form' | 'national_id' | 'thanks' | 'recorded'>(() => {
     if (readFlag(storageKey)) return 'recorded';
     try {
@@ -184,6 +185,7 @@ const PatientDocumentUpload: React.FC<{ leadId: string }> = ({ leadId }) => {
   const [patientIdUploaded, setPatientIdUploaded] = useState(() => readFlag(patientIdKey));
   const [companionIdUploaded, setCompanionIdUploaded] = useState(() => readFlag(companionIdKey));
   const [passportUploaded, setPassportUploaded] = useState(() => readFlag(passportKey));
+  const [companionPassportUploaded, setCompanionPassportUploaded] = useState(() => readFlag(companionPassportKey));
   const [idUploadBusy, setIdUploadBusy] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -267,8 +269,8 @@ const PatientDocumentUpload: React.FC<{ leadId: string }> = ({ leadId }) => {
 
   if (view === 'recorded') {
     return (
-      <main className="min-h-screen bg-slate-950 flex items-center justify-center p-6">
-        <section className="w-full max-w-xl bg-white rounded-[2rem] p-8 shadow-2xl text-center">
+      <main className="h-screen overflow-y-auto bg-slate-950 flex p-6">
+        <section className="w-full max-w-xl m-auto bg-white rounded-[2rem] p-8 shadow-2xl text-center">
           <div className="w-14 h-14 mx-auto rounded-2xl bg-emerald-100 text-emerald-700 flex items-center justify-center mb-5">
             <CheckCircle2 size={28} />
           </div>
@@ -289,8 +291,8 @@ const PatientDocumentUpload: React.FC<{ leadId: string }> = ({ leadId }) => {
 
   if (view === 'thanks') {
     return (
-      <main className="min-h-screen bg-slate-950 flex items-center justify-center p-6">
-        <section className="w-full max-w-xl bg-white rounded-[2rem] p-8 shadow-2xl text-center">
+      <main className="h-screen overflow-y-auto bg-slate-950 flex p-6">
+        <section className="w-full max-w-xl m-auto bg-white rounded-[2rem] p-8 shadow-2xl text-center">
           <div className="w-14 h-14 mx-auto rounded-2xl bg-emerald-100 text-emerald-700 flex items-center justify-center mb-5">
             <CheckCircle2 size={28} />
           </div>
@@ -320,13 +322,13 @@ const PatientDocumentUpload: React.FC<{ leadId: string }> = ({ leadId }) => {
   if (view === 'national_id') {
     const canConfirm = patientIdUploaded && companionIdUploaded && !idUploadBusy;
     return (
-      <main className="min-h-screen bg-slate-950 flex items-center justify-center p-6">
-        <section className="w-full max-w-xl bg-white rounded-[2rem] p-8 shadow-2xl">
+      <main className="h-screen overflow-y-auto bg-slate-950 flex p-6">
+        <section className="w-full max-w-xl m-auto bg-white rounded-[2rem] p-8 shadow-2xl">
           <div className="w-14 h-14 rounded-2xl bg-teal-100 text-teal-700 flex items-center justify-center mb-5"><IdCard size={28} /></div>
           <p className="text-[11px] font-black uppercase tracking-widest text-teal-700">Step 2 of 2</p>
           <h1 className="text-2xl font-black text-slate-900 mt-1">Submit ID & passport</h1>
           <p className="text-sm text-slate-500 mt-2">
-            Please upload a national ID card for the patient and for the companion (both required), and the patient's passport personal particulars page (optional for now).
+            Please upload a national ID card for the patient and for the companion (both required), and the passport personal particulars page of the patient and the companion (optional for now).
           </p>
 
           <div className="mt-6 space-y-4">
@@ -357,6 +359,17 @@ const PatientDocumentUpload: React.FC<{ leadId: string }> = ({ leadId }) => {
               hint="Passport page with your personal particulars (name, date of birth, passport number)."
               alreadyUploaded={passportUploaded}
               onUploaded={() => { writeFlag(passportKey, '1'); setPassportUploaded(true); }}
+              onBusyChange={setIdUploadBusy}
+            />
+            <NationalIdUploader
+              leadId={leadId}
+              kind="companion_passport"
+              label="Companion"
+              documentName="passport"
+              required={false}
+              hint="Passport page with the companion's personal particulars (name, date of birth, passport number)."
+              alreadyUploaded={companionPassportUploaded}
+              onUploaded={() => { writeFlag(companionPassportKey, '1'); setCompanionPassportUploaded(true); }}
               onBusyChange={setIdUploadBusy}
             />
           </div>
@@ -395,8 +408,8 @@ const PatientDocumentUpload: React.FC<{ leadId: string }> = ({ leadId }) => {
   const readyToConfirm = doneCount > 0 && toUpload.length === 0 && !uploading;
 
   return (
-    <main className="min-h-screen bg-slate-950 flex items-center justify-center p-6">
-      <section className="w-full max-w-xl bg-white rounded-[2rem] p-8 shadow-2xl">
+    <main className="h-screen overflow-y-auto bg-slate-950 flex p-6">
+      <section className="w-full max-w-xl m-auto bg-white rounded-[2rem] p-8 shadow-2xl">
         <div className="w-14 h-14 rounded-2xl bg-teal-100 text-teal-700 flex items-center justify-center mb-5"><FileUp size={28} /></div>
         <p className="text-[11px] font-black uppercase tracking-widest text-teal-700">Step 1 of 2</p>
         <h1 className="text-2xl font-black text-slate-900 mt-1">Upload medical documents</h1>
