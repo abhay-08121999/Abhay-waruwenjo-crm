@@ -8,16 +8,83 @@ import {
   User, CheckCircle2, Clock, ArrowLeft, ChevronLeft, Check, Circle, Workflow, Archive, Trash2, RotateCcw, Save
 } from 'lucide-react';
 import { toast } from 'sonner';
-import { CrmRole, getCustomStageAccess } from '../services/roles';
+import { CrmRole, getCustomStageAccess, fetchCrmUsers } from '../services/roles';
+import { useLeadGrants } from '../services/leadAccess';
+import { supabase } from '../integrations/supabase/client';
+
+// Current BDM assigned to a medical lead (the BDM holding its grant), or null.
+const loadMedicalLeadAssignment = async (leadId: string): Promise<string | null> => {
+  const { data, error } = await (supabase as any)
+    .from('crm_lead_access')
+    .select('user_id')
+    .eq('lead_type', 'medical')
+    .eq('lead_id', String(leadId))
+    .limit(1);
+  if (error) throw error;
+  return data?.[0]?.user_id ?? null;
+};
+
+// A medical lead has one assigned BDM. Assigning replaces the previous grant.
+const replaceMedicalLeadAssignment = async (leadId: string, userId: string | null) => {
+  const db = supabase as any;
+  const { error: deleteError } = await db
+    .from('crm_lead_access')
+    .delete()
+    .eq('lead_type', 'medical')
+    .eq('lead_id', String(leadId));
+  if (deleteError) throw deleteError;
+  if (!userId) return;
+  const { data: auth } = await supabase.auth.getUser();
+  const { error } = await db.from('crm_lead_access').insert({
+    lead_type: 'medical',
+    lead_id: String(leadId),
+    user_id: userId,
+    granted_by: auth.user?.id ?? null,
+  });
+  if (error) throw error;
+};
+
+// Saves the partner's stage to medical_leads so analytics can count conversions.
+// Stage 4 (Active Partners) is the conversion. The first conversion time and BDM are kept.
+const syncMedicalLeadStage = async (leadId: string, stage: number) => {
+  await supabase.from('medical_leads').update({ workflow_stage: stage } as any).eq('id', leadId);
+  if (stage !== 4) return;
+  const { data: auth } = await supabase.auth.getUser();
+  await supabase
+    .from('medical_leads')
+    .update({ converted_at: new Date().toISOString(), converted_by: auth.user?.id ?? null } as any)
+    .eq('id', leadId)
+    .is('converted_at', null);
+};
 
 type ViewMode = 'TABLE' | 'BOARD';
 
 const Leads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   // Custom roles only see and edit the stages ticked for them (Read / Write) in User & Role Management.
   const stageAccess = getCustomStageAccess(roles, 'medical_leads');
+  // Only the BDM granted a medical lead (Lead Access Manager) may edit it. Other BDMs can view it.
+  const { restricted: restrictedBdm, isGranted } = useLeadGrants(roles);
+  const normalizeRoleKey = (value: string) => String(value || '').toLowerCase().replace(/[^a-z]/g, '');
+  const canAssignMedicalLeads = roles.some(role =>
+    ['superadmin', 'admin'].includes(normalizeRoleKey(role.key)) || ['superadmin', 'admin'].includes(normalizeRoleKey(role.name)));
+  // BDM choices for the "Assigned BDM" selector.
+  const [bdmOptions, setBdmOptions] = useState<{ id: string; name: string }[]>([]);
+  useEffect(() => {
+    fetchCrmUsers()
+      .then(({ data }: any) => {
+        const bdms = (data || [])
+          .filter((user: any) => (user.roles || []).some((role: any) => role.key === 'bdm'))
+          .map((user: any) => ({ id: user.user_id, name: user.full_name || user.username || user.email || 'BDM' }))
+          .sort((a: any, b: any) => a.name.localeCompare(b.name));
+        setBdmOptions(bdms);
+      })
+      .catch(error => console.error('Could not load BDM list', error));
+  }, []);
+  const isMedicalLeadLocked = (leadId?: string | number | null) =>
+    restrictedBdm && leadId != null && !isGranted('medical', leadId);
   const canReadMedicalStage = (stageId: number) => !stageAccess || stageAccess.read.has(stageId);
   const canWriteMedicalStage = (stageId: number) =>
-    !stageAccess || stageAccess.write.has(stageId);
+    !activeMedicalLocked && (!stageAccess || stageAccess.write.has(stageId));
   const blockReadOnlyMedicalWrite = (stageId: number) => {
     if (canWriteMedicalStage(stageId)) return false;
     toast.error('You have read-only access to this stage.');
@@ -28,6 +95,8 @@ const Leads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [viewMode, setViewMode] = useState<ViewMode>('BOARD');
   const [selectedLead, setSelectedLead] = useState<any | null>(null);
+  // True when this BDM is not granted the open medical lead: it can be viewed but not changed.
+  const activeMedicalLocked = !!selectedLead && isMedicalLeadLocked(selectedLead.id);
 
   const [showNewPartner, setShowNewPartner] = useState(false);
   const [savingPartner, setSavingPartner] = useState(false);
@@ -423,6 +492,30 @@ const Leads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
     // Browsing is view-only: it never moves the lead and never allows edits.
     const [viewOnly, setViewOnly] = useState(false);
     const canWriteActive = canWriteMedicalStage(activeStage) && !viewOnly;
+    const [assignedBdmId, setAssignedBdmId] = useState<string | null>(null);
+    const [assigningBdm, setAssigningBdm] = useState(false);
+    useEffect(() => {
+      loadMedicalLeadAssignment(lead.id).then(setAssignedBdmId).catch(error => console.error('Could not load assigned BDM', error));
+    }, [lead.id]);
+    const handleAssignBdm = async (userId: string | null) => {
+      setAssigningBdm(true);
+      try {
+        await replaceMedicalLeadAssignment(lead.id, userId);
+        setAssignedBdmId(userId);
+        toast.success(userId ? 'BDM assigned to this medical lead' : 'BDM unassigned');
+      } catch (error: any) {
+        toast.error(`Could not update the BDM: ${error?.message || 'unknown error'}`);
+      } finally {
+        setAssigningBdm(false);
+      }
+    };
+    const assignedBdmName = assignedBdmId
+      ? bdmOptions.find(bdm => bdm.id === assignedBdmId)?.name || 'Assigned BDM'
+      : 'Not assigned';
+    useEffect(() => {
+      if (!canWriteActive) return;
+      syncMedicalLeadStage(lead.id, activeStage).catch(() => undefined);
+    }, [activeStage, canWriteActive]);
     const blockReadOnlyMedicalWrite = (stageId: number) => {
       if (!viewOnly && canWriteMedicalStage(stageId)) return false;
       toast.error('You have read-only access to this stage.');
@@ -574,7 +667,7 @@ const Leads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
         if (!dbResult.error) toast.success('Document uploaded and linked to this medical lead.');
       } catch (error: any) {
         console.error(`[Stage 4] Signed ${kind} upload failed:`, error);
-        toast.error(error?.message || `Could not upload signed ${kind === 'MOU' ? 'MOU' : 'Consent Letter'}. Check the signedmou bucket and its Storage policies.`);
+        toast.error(error?.message || `Could not upload signed ${kind === 'MOU' ? 'MOU' : 'Consent Letter'}. Check the signed-documents bucket and its Storage policies.`);
       } finally {
         setUploadingStage4Document(null);
       }
@@ -735,7 +828,7 @@ const Leads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
     const chooseStage = (stageId: number) => {
       if (!canReadMedicalStage(stageId)) { toast.error('You do not have access to that stage.'); return; }
       const savedStage = readState().stage;
-      if (stageAccess && !canWriteMedicalStage(savedStage)) {
+      if (!canWriteMedicalStage(savedStage)) {
         // Read-only on the lead's own stage: switch the view only, do not move or save anything.
         setActiveStage(stageId);
         setViewOnly(stageId !== savedStage);
@@ -805,6 +898,31 @@ const Leads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
           </div>
         </section>
         <section className="bg-white border border-slate-200 rounded-[2rem] p-5 md:p-7 shadow-sm">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Assigned BDM</p>
+              <p className="mt-1 text-lg font-black text-slate-900">{assignedBdmName}</p>
+              <p className="mt-1 text-xs text-slate-500">Only the assigned BDM can update this medical lead. Other BDMs can view it.</p>
+            </div>
+            {canAssignMedicalLeads ? (
+              <div className="flex flex-col gap-1 min-w-[220px]">
+                <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Change BDM</label>
+                <select
+                  value={assignedBdmId ?? ''}
+                  disabled={assigningBdm}
+                  onChange={(e) => handleAssignBdm(e.target.value || null)}
+                  className="rounded-xl border border-slate-200 px-3 py-2.5 text-sm font-bold text-slate-800 bg-white disabled:opacity-50"
+                >
+                  <option value="">Unassigned</option>
+                  {bdmOptions.map(bdm => (
+                    <option key={bdm.id} value={bdm.id}>{bdm.name}</option>
+                  ))}
+                </select>
+              </div>
+            ) : null}
+          </div>
+        </section>
+        <section className="bg-white border border-slate-200 rounded-[2rem] p-5 md:p-7 shadow-sm">
           <div className="flex items-center gap-2 mb-5"><Workflow size={18} className="text-indigo-600"/><h3 className="text-lg font-black text-slate-900">Partnership Workflow Stages</h3><span className="ml-auto text-xs font-bold text-slate-400">Stage {activeStage} of 5</span></div>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
             {stages.filter(stage => canReadMedicalStage(stage.id)).map(stage => { const complete = stageGateComplete(stage.id); const active = activeStage === stage.id; const locked = !(stageAccess && !canWriteMedicalStage(readState().stage)) && stage.id > activeStage && !(stage.id === 5 && (archiveState.archived || archiveState.deleted)); return <button key={stage.id} disabled={locked || !canReadMedicalStage(stage.id)} onClick={() => chooseStage(stage.id)} className={`text-left rounded-2xl border p-4 transition-all disabled:cursor-not-allowed disabled:opacity-50 ${active ? 'border-indigo-500 bg-indigo-50 ring-2 ring-indigo-100' : complete ? 'border-emerald-200 bg-emerald-50/60 hover:border-emerald-400' : 'border-slate-200 hover:border-indigo-300 hover:bg-slate-50'}`}><div className="flex items-center gap-3"><span className={`flex h-8 w-8 items-center justify-center rounded-xl text-xs font-black ${complete ? 'bg-emerald-600 text-white' : active ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-500'}`}>{complete ? <Check size={15}/> : stage.id}</span><div className="min-w-0"><p className="font-black text-sm text-slate-800">{stage.name}</p><p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">{stage.label}</p></div></div><div className="mt-3 h-1.5 rounded-full bg-slate-100 overflow-hidden"><div className={`h-full rounded-full ${complete ? 'bg-emerald-500' : 'bg-indigo-500'}`} style={{width: `${Math.min(100, doneCount(stage.id) / stage.tasks.length * 100)}%`}}/></div><p className="mt-2 text-[10px] font-bold text-slate-400">{doneCount(stage.id)} / {stage.tasks.length} tasks complete</p></button>; })}
@@ -812,7 +930,9 @@ const Leads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
         </section>
         {!canWriteActive && (
           <div className="rounded-2xl border border-amber-200 bg-amber-50 px-5 py-3 text-xs font-black uppercase tracking-widest text-amber-800">
-            Read-only access: you can view this stage but cannot make changes.
+            {activeMedicalLocked
+              ? 'Only the BDM assigned to this medical lead can make changes. You can view it.'
+              : 'Read-only access: you can view this stage but cannot make changes.'}
           </div>
         )}
         <div {...({ inert: !canWriteActive } as any)} className="space-y-6">
@@ -942,7 +1062,7 @@ const Leads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
             <div><p className="text-[10px] font-black uppercase tracking-widest text-indigo-600">Stage 4 · Operations / BDM</p><h3 className="text-xl font-black text-slate-900 mt-1">Activate & Manage Partner</h3><p className="text-sm text-slate-500 mt-1">Create or update the partner master record, preserve the original lead ID, and maintain lifecycle, service coverage, quality and renewal information. Signed document paths are linked to the medical lead in Supabase.</p></div>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3"><div className="rounded-2xl border border-slate-200 bg-slate-50 p-4"><p className="text-xs font-black text-slate-500">Original Lead ID</p><p className="mt-1 text-sm font-bold break-all">{String(lead.id)}</p></div><div className="rounded-2xl border border-slate-200 bg-slate-50 p-4"><p className="text-xs font-black text-slate-500">MoU Version</p><p className="mt-1 text-sm font-bold">{stage3.templateVersion || 'Not recorded'}</p></div><div className="rounded-2xl border border-slate-200 bg-slate-50 p-4"><p className="text-xs font-black text-slate-500">Lifecycle</p><p className="mt-1 text-sm font-bold">{stage4.lifecycle}</p></div></div>
             <div className="rounded-2xl border border-indigo-200 bg-indigo-50 p-5 space-y-4">
-              <div><h4 className="font-black text-indigo-950">Signed document repository</h4><p className="mt-1 text-sm text-indigo-800">Upload the final, fully signed PDF copies. Both documents are stored privately in the Supabase <strong>signedmou</strong> bucket under this lead ID.</p></div>
+              <div><h4 className="font-black text-indigo-950">Signed Documents</h4><p className="mt-1 text-sm text-indigo-800">Upload the final, fully signed PDFs: the signed MOU and the signed consent letter. They are stored privately in the <strong>signed-documents</strong> storage bucket under this medical lead.</p></div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div className="rounded-xl border border-indigo-100 bg-white p-4 space-y-3"><div><p className="text-sm font-black text-slate-900">Signed copy of MOU</p><p className="text-xs text-slate-500 mt-1">PDF only · maximum 20 MB</p></div><label className="inline-flex cursor-pointer items-center gap-2 rounded-xl bg-indigo-600 px-4 py-3 text-sm font-bold text-white hover:bg-indigo-700"><Upload size={16}/> {uploadingStage4Document === 'MOU' ? 'Uploading MOU…' : 'Upload signed copy of MOU'}<input disabled={uploadingStage4Document !== null} type="file" accept="application/pdf,.pdf" className="hidden" onChange={e=>{void uploadStage4SignedDocument('MOU',e.target.files?.[0]);e.currentTarget.value='';}}/></label>{stage4.signedMouPath ? <div className="flex flex-wrap items-center gap-3"><span className="text-xs font-semibold text-emerald-700">Signed MOU uploaded</span><button type="button" onClick={()=>void openStage4SignedDocument(stage4.signedMouPath)} className="text-xs font-bold text-indigo-700 underline">View / Download</button></div> : <p className="text-xs text-amber-700">No signed MOU uploaded yet.</p>}</div>
                 <div className="rounded-xl border border-indigo-100 bg-white p-4 space-y-3"><div><p className="text-sm font-black text-slate-900">Signed copy of Consent Letter</p><p className="text-xs text-slate-500 mt-1">PDF only · maximum 20 MB</p></div><label className="inline-flex cursor-pointer items-center gap-2 rounded-xl bg-emerald-600 px-4 py-3 text-sm font-bold text-white hover:bg-emerald-700"><Upload size={16}/> {uploadingStage4Document === 'CONSENT' ? 'Uploading consent letter…' : 'Upload signed copy of consent letter'}<input disabled={uploadingStage4Document !== null} type="file" accept="application/pdf,.pdf" className="hidden" onChange={e=>{void uploadStage4SignedDocument('CONSENT',e.target.files?.[0]);e.currentTarget.value='';}}/></label>{stage4.signedConsentPath ? <div className="flex flex-wrap items-center gap-3"><span className="text-xs font-semibold text-emerald-700">Signed Consent Letter uploaded</span><button type="button" onClick={()=>void openStage4SignedDocument(stage4.signedConsentPath)} className="text-xs font-bold text-indigo-700 underline">View / Download</button></div> : <p className="text-xs text-amber-700">No signed Consent Letter uploaded yet.</p>}</div>

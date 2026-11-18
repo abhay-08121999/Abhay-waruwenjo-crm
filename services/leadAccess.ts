@@ -25,9 +25,11 @@ export const isLeadRestrictedUser = (roles: Array<{ key?: string }>) => {
 };
 
 export const fetchMyLeadGrantKeys = async (): Promise<Set<string>> => {
+  const { data: auth } = await supabase.auth.getUser();
   const { data, error } = await db
     .from('crm_lead_access')
-    .select('lead_type, lead_id');
+    .select('lead_type, lead_id')
+    .eq('user_id', auth.user?.id ?? '');
 
   if (error) throw error;
 

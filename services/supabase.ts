@@ -1771,8 +1771,23 @@ export const getClinicalReportUrl = async (filePath: string) => {
   return { data: data?.publicUrl ?? null, error: null };
 };
 
+/** Turns Storage errors into messages that say what to fix. */
+const friendlyStorageError = (error: any): Error => {
+  const message = String(error?.message || error?.error || 'Upload failed.');
+  if (/bucket not found/i.test(message)) {
+    return new Error('The "signed-documents" storage bucket does not exist. Run signed_documents_storage.sql in the Supabase SQL editor.');
+  }
+  if (/row-level security|violates|not allowed|unauthorized|403/i.test(message)) {
+    return new Error('You do not have permission to upload signed documents for this medical lead. Ask an admin to grant you access.');
+  }
+  if (/already exists|duplicate/i.test(message)) {
+    return new Error('A file with this name already exists. Please try again.');
+  }
+  return error instanceof Error ? error : new Error(message);
+};
+
 /**
- * Upload the final, signed MOU PDF to the private `signedmou` bucket.
+ * Upload the final, signed MOU PDF to the private `signed-documents` bucket.
  * Draft/generated agreement PDFs continue to use the separate `agreements` bucket.
  * The returned filePath should be saved in agreements.signed_mou_path.
  */
@@ -1812,7 +1827,7 @@ export const uploadSignedMou = async (
   const filePath = `${normalizedId}/${safePartner}-signed-MOU-${Date.now()}.pdf`;
 
   const { data, error } = await supabase.storage
-    .from('signedmou')
+    .from('signed-documents')
     .upload(filePath, file, {
       contentType: 'application/pdf',
       upsert: false,
@@ -1820,15 +1835,15 @@ export const uploadSignedMou = async (
     });
 
   if (error) {
-    console.error('[signedmou] Upload failed:', error);
-    return { data: null, error, filePath: null as string | null };
+    console.error('[signed-documents] Upload failed:', error);
+    return { data: null, error: friendlyStorageError(error), filePath: null as string | null };
   }
 
   return { data, error: null, filePath };
 };
 
 /**
- * Upload the final signed Consent Letter PDF to the same private signed-document
+ * Upload the final signed Consent Letter PDF to the same private Signed Documents
  * bucket. It is stored in a separate folder beneath the original medical lead ID.
  */
 export const uploadSignedConsentLetter = async (
@@ -1849,12 +1864,12 @@ export const uploadSignedConsentLetter = async (
   }
   const safePartner = String(partnerName || 'partner').trim().replace(/[^a-zA-Z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80) || 'partner';
   const filePath = `${normalizedId}/consent/${safePartner}-signed-Consent-Letter-${Date.now()}.pdf`;
-  const { data, error } = await supabase.storage.from('signedmou').upload(filePath, file, {
+  const { data, error } = await supabase.storage.from('signed-documents').upload(filePath, file, {
     contentType: 'application/pdf', upsert: false, cacheControl: '3600',
   });
   if (error) {
-    console.error('[signedmou] Signed Consent Letter upload failed:', error);
-    return { data: null, error, filePath: null as string | null };
+    console.error('[signed-documents] Signed Consent Letter upload failed:', error);
+    return { data: null, error: friendlyStorageError(error), filePath: null as string | null };
   }
   return { data, error: null, filePath };
 };
@@ -1886,17 +1901,17 @@ export const getSignedMouUrl = async (filePath: string) => {
   const normalizedPath = String(filePath ?? '').trim();
   if (!normalizedPath) return { data: null, error: new Error('Signed MOU file path is required.') };
   const { data, error } = await supabase.storage
-    .from('signedmou')
+    .from('signed-documents')
     .createSignedUrl(normalizedPath, 60 * 10);
   return { data: data?.signedUrl ?? null, error };
 };
 
-/** Delete a signed MOU object from the private `signedmou` bucket. */
+/** Delete a signed MOU object from the private `signed-documents` bucket. */
 export const deleteSignedMou = async (filePath: string) => {
   const normalizedPath = String(filePath ?? '').trim();
   if (!normalizedPath) return { error: new Error('Signed MOU file path is required.') };
-  const { error } = await supabase.storage.from('signedmou').remove([normalizedPath]);
-  if (error) console.error('[signedmou] Delete failed:', error);
+  const { error } = await supabase.storage.from('signed-documents').remove([normalizedPath]);
+  if (error) console.error('[signed-documents] Delete failed:', error);
   return { error };
 };
 
@@ -1914,7 +1929,7 @@ export const saveSignedMouPath = async (agreementId: string, filePath: string) =
     .eq('id', id)
     .select()
     .single();
-  if (error) console.error('[signedmou] Could not save Storage path:', error);
+  if (error) console.error('[signed-documents] Could not save Storage path:', error);
   return { data, error };
 };
 

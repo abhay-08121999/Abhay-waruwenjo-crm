@@ -3,6 +3,7 @@ import { getLeadCode } from '../lib/leadCode.ts';
 import { fetchLeads, createLead, updateLeadStatus, updatePatientEnquiry, convertProfileToCase, createConsultationFromEnquiry, fetchActiveDoctors, fetchDoctors, fetchHospitals, updateLeadWorkflow, saveLeadWorkflowState, logAdminActivity, fetchAdminActivityLogs, sendCrmEmail, fetchEnquiryDocuments, createPatientAccountFromEnquiry, uploadEnquiryDocument, fetchCrmUsersByRole, fetchMasterTemplate } from '../services/supabase.ts';
 import { supabase } from '../integrations/supabase/client';
 import { fetchInHouseDoctorUsers, InHouseDoctorUser, CrmRole, getCustomStageAccess } from '../services/roles';
+import { useLeadGrants } from '../services/leadAccess';
 import { LeadStatus, Lead, Doctor, Hospital } from '../types.ts';
 import { buildWaruWenJoEmailFull } from './emailTemplate';
 import { fillLeadEmailTemplate, buildPatientLink, LEAD_EMAIL_LOG_LABELS, type LeadEmailKind } from '../lib/leadEmailDraft';
@@ -64,7 +65,8 @@ const MOM_FIELDS: [string, string][] = [
 
 type ViewMode = 'TABLE' | 'BOARD';
 
-const IN_HOUSE_DOCTOR_STAGES = [3, 4, 5];
+// In-house doctors work only on Stage 4 (Doctor Inbox) and Stage 5 (Clinical), on leads assigned to them.
+const IN_HOUSE_DOCTOR_STAGES = [4, 5];
 
 const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   // In-House Doctor can only work on stages 3, 4 and 5.
@@ -77,11 +79,37 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
     );
   // Custom roles only see and edit the stages ticked for them (Read / Write) in User & Role Management.
   const customStageAccess = getCustomStageAccess(roles, 'patient_leads');
+  const normalizeRoleKey = (value: string) => String(value || '').toLowerCase().replace(/[^a-z]/g, '');
+  const hasAnyRole = (...names: string[]) =>
+    roles.some(role => names.includes(normalizeRoleKey(role.key)) || names.includes(normalizeRoleKey(role.name)));
+  // BDMs can open and work every patient lead stage (1 to 9), including Stage 4 (Doctor Inbox) and Stage 5 (Clinical).
+  const isBdmUser = hasAnyRole('bdm') && !hasAnyRole('superadmin', 'admin');
+  const BDM_STAGE_IDS = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+  // Only the BDM granted a lead in the Lead Access Manager may edit it. Other BDMs can still view it.
+  const { restricted: restrictedBdm, isGranted } = useLeadGrants(roles);
+  // A BDM may edit a lead when it is assigned to them (assigned_bdm_id) or when they hold a grant for it.
+  const isLeadLocked = (leadId?: string | number | null) => {
+    if (leadId == null) return false;
+    const id = String(leadId);
+    const lead: any = leads.find(l => String(l.id) === id) ?? (selectedLead && String(selectedLead.id) === id ? selectedLead : null);
+    // In-house doctors can only work on leads assigned to them (assigned_to).
+    if (isInHouseDoctorOnly) return !(lead?.assignedTo && lead.assignedTo === currentUserId);
+    if (!restrictedBdm) return false;
+    const assignedToMe = !!lead?.assignedBdmId && lead.assignedBdmId === currentUserId;
+    return !assignedToMe && !isGranted('patient', leadId);
+  };
+  const denyIfLeadLocked = (leadId?: string | number | null) => {
+    const id = leadId ?? selectedLead?.id;
+    if (!isLeadLocked(id)) return false;
+    toast.error('Only the BDM assigned to this lead can update it.');
+    return true;
+  };
   const canAccessStage = (stageId: number) =>
     (!isInHouseDoctorOnly || IN_HOUSE_DOCTOR_STAGES.includes(stageId)) &&
-    (!customStageAccess || customStageAccess.read.has(stageId));
+    (isBdmUser ? BDM_STAGE_IDS.includes(stageId) : !customStageAccess || customStageAccess.read.has(stageId));
   const canWriteStage = (stageId: number) =>
-    !customStageAccess || customStageAccess.write.has(stageId);
+    !activeLeadLocked &&
+    (isBdmUser ? BDM_STAGE_IDS.includes(stageId) : !customStageAccess || customStageAccess.write.has(stageId));
   const blockReadOnlyWrite = (stageId: number) => {
     if (canWriteStage(stageId)) return false;
     toast.error('You have read-only access to this stage.');
@@ -93,7 +121,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
       const readable = Array.from(customStageAccess.read).sort((a, b) => a - b);
       return readable.find(id => id >= stageId) ?? readable[readable.length - 1] ?? stageId;
     }
-    return canAccessStage(stageId) ? stageId : stageId < 3 ? 3 : 5;
+    return canAccessStage(stageId) ? stageId : stageId < 4 ? 4 : 5;
   };
   const [leads, setLeads] = useState<Lead[]>([]);
   const [hospitals, setHospitals] = useState<Hospital[]>([]);
@@ -108,6 +136,13 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   const [showDetailPane, setShowDetailPane] = useState(false);
   
   const [selectedLead, setSelectedLead] = useState<Lead | null>(null);
+  // The signed-in user's id, used to recognise leads assigned to them.
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  useEffect(() => {
+    supabase.auth.getUser().then(({ data }) => setCurrentUserId(data.user?.id ?? null)).catch(() => undefined);
+  }, []);
+  // True when this BDM is not assigned or granted the open lead: it can be viewed but not changed.
+  const activeLeadLocked = showDetailPane && !!selectedLead && isLeadLocked(selectedLead.id);
 
   const [selectedDoctorId, setSelectedDoctorId] = useState('');
   const [newLead, setNewLead] = useState<Partial<Lead>>({
@@ -406,6 +441,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
 
   // Staff upload of patient documents (PDF, JPG, JPEG, PNG). Several files at once are supported.
   const handleStaffDocumentUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (denyIfLeadLocked()) return;
     const files = Array.from(e.target.files || []);
     if (documentFileInputRef.current) documentFileInputRef.current.value = '';
     if (!selectedLead || !files.length) return;
@@ -513,7 +549,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
 
     // Read-only on the lead's own stage: switch the view only, never move the lead or save anything.
     const leadOwnStage = Number(selectedLead.workflowStage) || 1;
-    if (customStageAccess && !canWriteStage(leadOwnStage)) {
+    if (!canWriteStage(leadOwnStage)) {
       setActiveWorkflowStage(stage);
       setIsViewOnlyStage(stage !== leadOwnStage);
       return;
@@ -562,6 +598,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   };
 
   const handleRestoreLead = async (leadToRestore?: Lead) => {
+    if (denyIfLeadLocked(leadToRestore?.id)) return;
     const targetLead = leadToRestore || selectedLead;
     if (!targetLead) return;
     if (blockReadOnlyWrite(9)) return;
@@ -639,6 +676,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
 
   // ── Stage 1: Identify Priority ──
   const handleUpdateUrgency = async (value: string) => {
+    if (denyIfLeadLocked()) return;
     if (!selectedLead) return;
     if (blockReadOnlyWrite(activeWorkflowStage)) return;
     const { error } = await updatePatientEnquiry(selectedLead.id, { urgency: value });
@@ -753,6 +791,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   };
 
   const handleMarkProcessExplained = async () => {
+    if (denyIfLeadLocked()) return;
     if (!selectedLead) return;
     const explainedAt = new Date().toISOString();
     const emailSent = Boolean(workflowStateRef.current?.document_request_sent_at);
@@ -796,6 +835,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   };
 
   const handleGenerateAdvancePaymentLink = async () => {
+    if (denyIfLeadLocked()) return;
     if (!vilSubmission) {
       toast.error('The patient must submit the VIL medical visa form before the advance payment link is generated.');
       return;
@@ -809,6 +849,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   };
 
   const handleVerifyAdvancePayment = async () => {
+    if (denyIfLeadLocked()) return;
     const state = workflowStateRef.current || localWorkflowState;
     if (!state?.payment_reference || !state?.payment_link) {
       toast.error('Generate and provide the payment link before verifying payment.');
@@ -823,6 +864,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   };
 
   const handleCompleteSpecialistCall = async (notes: string) => {
+    if (denyIfLeadLocked()) return;
     if (!notes.trim()) {
       toast.error('Record the specialist discussion notes first.');
       return;
@@ -835,6 +877,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   };
 
   const handleRecordMOM = async () => {
+    if (denyIfLeadLocked()) return;
     const state = workflowStateRef.current || localWorkflowState;
     const requiredMomFields = ['mom_date_time', 'mom_participants', 'mom_discussion_points', 'mom_specialist_observations', 'mom_patient_questions', 'mom_decisions', 'mom_next_steps', 'mom_instructions'];
     if (requiredMomFields.some(field => !String(state?.[field] || '').trim())) {
@@ -971,6 +1014,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   };
 
   const handleCompleteBdmCall = async (notes: string) => {
+    if (denyIfLeadLocked()) return;
     if (!notes.trim()) {
       toast.error('Record the BDM patient-call notes first.');
       return;
@@ -983,6 +1027,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   };
 
   const handleConfirmQuotationAgreement = async (confirmed: boolean) => {
+    if (denyIfLeadLocked()) return;
     if (confirmed) {
       await saveStage7Task('Confirm Quotation Agreement', { quotation_agreement_confirmed: true });
       toast.success('Quotation agreement confirmed');
@@ -992,6 +1037,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   };
 
   const handleConfirmClinicalProcessAgreement = async (confirmed: boolean) => {
+    if (denyIfLeadLocked()) return;
     if (confirmed) {
       await saveStage7Task('Confirm Clinical Process Agreement', { clinical_process_agreement_confirmed: true });
       toast.success('Clinical process agreement confirmed');
@@ -1011,6 +1057,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   };
 
   const handleRequestPatientToProceed = async () => {
+    if (denyIfLeadLocked()) return;
     await saveStage7Task('Request Patient to Proceed', {
       request_to_proceed_confirmed: true,
       request_to_proceed_at: new Date().toISOString(),
@@ -1019,6 +1066,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   };
 
   const handleProvidePaymentLink = async (link: string) => {
+    if (denyIfLeadLocked()) return;
     if (!link.trim()) {
       toast.error('Enter the payment link before providing it to the patient.');
       return;
@@ -1041,6 +1089,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   };
 
   const handlePreparePatientHandover = async () => {
+    if (denyIfLeadLocked()) return;
     if (!selectedLead) {
       toast.error('No patient enquiry selected.');
       return;
@@ -1150,6 +1199,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   };
 
   const handleShareHandoverInformation = async (type: 'clinical' | 'financial' | 'specialist') => {
+    if (denyIfLeadLocked()) return;
     const state = workflowStateRef.current || localWorkflowState;
     const fields = type === 'clinical'
       ? { clinical_information_shared: true }
@@ -1161,6 +1211,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   };
 
   const handleInitiateHandover = async () => {
+    if (denyIfLeadLocked()) return;
     const state = workflowStateRef.current || localWorkflowState;
     if (!state?.patient_user_id) {
       toast.error('Create or link the patient account before sending the handover.');
@@ -1174,6 +1225,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   };
 
   const handleAcceptHandover = async () => {
+    if (denyIfLeadLocked()) return;
     const state = workflowStateRef.current || localWorkflowState;
     if (!state?.handover_initiated_at) {
       toast.error('Send the handover to CDM/WaruBuddy before accepting it.');
@@ -1187,6 +1239,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   };
 
   const handleConfirmCaseOwnership = async () => {
+    if (denyIfLeadLocked()) return;
     const state = workflowStateRef.current || localWorkflowState;
     if (!state?.handover_accepted_at) {
       toast.error('CDM/WaruBuddy must accept the handover before ownership is confirmed.');
@@ -1217,6 +1270,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
     leads.find((l) => l.id === lead.id)?.assignedBdmId ?? lead.assignedBdmId ?? null;
 
   const handleAssignBdm = async (leadId: string, bdmId: string | null) => {
+    if (denyIfLeadLocked(leadId)) return;
     const { error } = await updatePatientEnquiry(leadId, { assigned_bdm_id: bdmId });
     if (error) {
       toast.error(`Could not assign BDM: ${error.message}`);
@@ -1263,6 +1317,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
     inHouseDoctors.find((d) => d.userId === inHouseIdFor(lead))?.name || 'Unassigned';
 
   const handleAssignInHouseDoctor = async (leadId: string, doctorUserId: string | null) => {
+    if (denyIfLeadLocked(leadId)) return;
     const doctorName = inHouseDoctors.find((d) => d.userId === doctorUserId)?.name || '';
     const { error } = await updatePatientEnquiry(leadId, { assigned_to: doctorUserId });
     if (error) {
@@ -1316,6 +1371,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
 
   // Staff fallback: patient told us their choice by phone / WhatsApp
   const handleSelectQuotation = async (quotation: { no: number; id: string; label: string; total: number; currency: string }) => {
+    if (denyIfLeadLocked()) return;
     if (!selectedLead) return;
     const selectedAt = new Date().toISOString();
     const { error } = await supabase
@@ -1332,22 +1388,13 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
     toast.success(`${quotation.label} recorded as the patient's choice`);
   };
 
-  const handleQuotationOptionsSent = async ({ token }: { token: string; sentAt: string }) => {
-    if (!selectedLead) return;
-    await refreshQuotationChoice(selectedLead.id);
-    await logAdminActivity('Quotation Options Emailed to Patient', 'Patient Lead', selectedLead.id, {
-      email: selectedLead.email,
-      choice_token: token,
-    });
-    loadActivityLogs(selectedLead.id);
-  };
-
   // Pick up the patient's choice whenever Stage 6 is opened
   useEffect(() => {
     if (selectedLead?.id && activeWorkflowStage === 6) refreshQuotationChoice(selectedLead.id);
   }, [selectedLead?.id, activeWorkflowStage]);
 
   const handleConfirmPatientInterest = async (interest: 'Agreed' | 'Disagreed') => {
+    if (denyIfLeadLocked()) return;
     await saveStage6Task('Confirm Patient Interest Via Call', { patient_interest: interest });
     toast.success(`Patient interest recorded: ${interest}`);
   };
@@ -1387,11 +1434,13 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   };
 
   const handleToggleVisaSent = async (checked: boolean) => {
+    if (denyIfLeadLocked()) return;
     await saveVisaFlag('Send Visa Application', { visa_application_sent_at: checked ? new Date().toISOString() : null });
     if (selectedLead) loadActivityLogs(selectedLead.id);
   };
 
   const handleToggleVisaCreated = async (checked: boolean) => {
+    if (denyIfLeadLocked()) return;
     await saveVisaFlag('Visa Application Created', {
       visa_application_created: checked,
       visa_application_created_at: checked ? new Date().toISOString() : null,
@@ -1399,6 +1448,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   };
 
   const handleUploadVisaDocument = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (denyIfLeadLocked()) return;
     const file = e.target.files?.[0];
     e.target.value = '';
     if (!file || !selectedLead) return;
@@ -1447,6 +1497,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   };
 
   const handleSendVilForm = async () => {
+    if (denyIfLeadLocked()) return;
     if (isSendingVilForm || !selectedLead) return;
     setIsSendingVilForm(true);
     try {
@@ -1470,6 +1521,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   };
 
   const handleSendDocumentRequest = async () => {
+    if (denyIfLeadLocked()) return;
     if (isSendingDocumentRequest || !selectedLead) return;
     setIsSendingDocumentRequest(true);
     try {
@@ -1503,6 +1555,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   };
 
   const handleLogFirstCall = async () => {
+    if (denyIfLeadLocked()) return;
     if (!selectedLead) return;
     if (!callOutcomeDraft) {
       toast.error('Select a call outcome before saving the call.');
@@ -1553,6 +1606,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
 
   // Saves only the raw call notes (no outcome needed) and ticks "Record Call Notes"
   const handleSaveRawCall = async () => {
+    if (denyIfLeadLocked()) return;
     if (!selectedLead) return;
     const notes = callNotesDraft.trim();
     if (!notes) {
@@ -1572,6 +1626,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   };
 
   const handleScheduleCallback = async () => {
+    if (denyIfLeadLocked()) return;
     if (!selectedLead || !callbackDateDraft) {
       toast.error('Choose a callback date and time first.');
       return;
@@ -1606,6 +1661,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   };
 
   const handleSaveCallSummary = async () => {
+    if (denyIfLeadLocked()) return;
     if (!selectedLead || !aiSummaryDraft.trim()) {
       toast.error('There is no summary to save.');
       return;
@@ -1630,6 +1686,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   };
 
   const handleUpdateSummary = async (field: string, value: any) => {
+    if (denyIfLeadLocked()) return;
      if (!selectedLead || !localWorkflowState) return;
      await persistWorkflowPatch({ [field]: value });
   };
@@ -1734,6 +1791,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   };
 
   const handleAssignDoctor = async (doctorName: string) => {
+    if (denyIfLeadLocked()) return;
     if (!selectedLead) return;
     
     setSelectedInHouseDoctor(doctorName);
@@ -1772,12 +1830,14 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   };
 
   const handleDoctorCallCompleted = async () => {
+    if (denyIfLeadLocked()) return;
     if (!selectedLead) return;
     await saveStage4Task('Personal Call by In-House Doctor', { doctor_call_at: new Date().toISOString() });
     toast.success('Personal doctor call recorded');
   };
 
   const handleSaveInitialAssessment = async () => {
+    if (denyIfLeadLocked()) return;
     if (!selectedLead || !localWorkflowState?.initial_doctor_assessment?.trim()) {
       toast.error('Enter the initial doctor assessment first.');
       return;
@@ -1795,6 +1855,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   };
 
   const handleSaveDoctorCallNotes = async () => {
+    if (denyIfLeadLocked()) return;
     if (!selectedLead || !localWorkflowState?.doctor_call_notes?.trim()) {
       toast.error('Enter the doctor call notes first.');
       return;
@@ -1813,6 +1874,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   };
 
   const handleSendPersonalDoctorEmail = async () => {
+    if (denyIfLeadLocked()) return;
     if (!selectedLead) return;
     const result = await sendLeadTemplateEmail('personal_doctor_email', {
       patient_name: escapeEmailHtml(selectedLead.name || 'Patient'),
@@ -1824,6 +1886,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   };
 
   const handleCompleteDoctorInteraction = async () => {
+    if (denyIfLeadLocked()) return;
     const currentStage4Checklist = (workflowStateRef.current || localWorkflowState)?.stage4_checklist || [];
     const stage4Prerequisites = STAGES.find(stage => stage.id === 4)?.tasks
       .filter(task => task !== 'Complete In-House Doctor Interaction') || [];
@@ -1840,6 +1903,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   };
 
   const handleSendClinicalDoctorEmail = async () => {
+    if (denyIfLeadLocked()) return;
     if (!selectedLead) return;
     const result = await sendLeadTemplateEmail('clinical_doctor_email', {
       patient_name: escapeEmailHtml(selectedLead.name || 'Patient'),
@@ -1851,6 +1915,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   };
 
   const handleFinalizeClinicalRecommendation = async () => {
+    if (denyIfLeadLocked()) return;
     if (!localWorkflowState?.suggested_hospital || !localWorkflowState?.suggested_surgeon || !localWorkflowState?.suggested_procedures) {
       toast.error('Select a hospital, surgeon/specialist, and procedure first.');
       return;
@@ -1864,6 +1929,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   };
 
   const handleConfirmClinicalReview = async () => {
+    if (denyIfLeadLocked()) return;
     if (!localWorkflowState?.clinical_recommendation_finalized) {
       toast.error('Finalize the clinical recommendation first.');
       return;
@@ -2509,9 +2575,12 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   };
 
   // Custom roles only see leads that are currently in a stage they can read.
-  const visibleLeads = customStageAccess
-    ? leads.filter(lead => canAccessStage(Number(lead.workflowStage) || 1))
-    : leads;
+  // In-house doctors see only the leads assigned to them, at the stages they can work on.
+  const visibleLeads = isInHouseDoctorOnly
+    ? leads.filter(lead => lead.assignedTo === currentUserId && canAccessStage(Number(lead.workflowStage) || 1))
+    : customStageAccess
+      ? leads.filter(lead => canAccessStage(Number(lead.workflowStage) || 1))
+      : leads;
 
   const filteredLeads = visibleLeads.filter(lead =>
     (lead.name?.toLowerCase() || "").includes(searchTerm.toLowerCase()) ||
@@ -2564,6 +2633,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   };
 
   const handleStatusUpdate = async (id: string, status: string) => {
+    if (denyIfLeadLocked(id)) return;
     if (blockReadOnlyWrite(Number(leads.find(item => item.id === id)?.workflowStage) || 1)) return;
     const { error } = await updateLeadStatus(id, status);
     if (error) {
@@ -2575,6 +2645,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   };
 
   const handleConvertToCase = async (lead: Lead) => {
+    if (denyIfLeadLocked(lead.id)) return;
     if (isConvertingToCase) return;
     if (blockReadOnlyWrite(8)) return;
     setIsConvertingToCase(true);
@@ -2716,6 +2787,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   };
 
   const handleScheduleConsultation = async () => {
+    if (denyIfLeadLocked()) return;
     if (!selectedDoctorId || !selectedLead) return;
     if (blockReadOnlyWrite(activeWorkflowStage)) return;
 
@@ -3164,7 +3236,9 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
 
               {isStageReadOnly && (
                 <div className="rounded-2xl border border-amber-200 bg-amber-50 px-5 py-3 text-xs font-black uppercase tracking-widest text-amber-800">
-                  Read-only access: you can view this stage but cannot make changes.
+                  {activeLeadLocked
+                    ? 'Only the BDM assigned to this lead can make changes. You can view it.'
+                    : 'Read-only access: you can view this stage but cannot make changes.'}
                 </div>
               )}
 
@@ -3643,9 +3717,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                               lead={selectedLead}
                               selectedQuotationNo={choiceFor(selectedLead).selectedQuotationNo}
                               selectedQuotationAt={choiceFor(selectedLead).selectedQuotationAt}
-                              optionsSentAt={choiceFor(selectedLead).quotationChoice?.sent_at ?? null}
                               onSelectQuotation={handleSelectQuotation}
-                              onOptionsSent={handleQuotationOptionsSent}
                               onRefreshChoice={() => refreshQuotationChoice(selectedLead.id)}
                               readOnly={isStageReadOnly}
                             />

@@ -1,8 +1,6 @@
 import React, { useEffect, useState } from 'react';
-import { Plus, Pencil, Eye, EyeOff, ExternalLink, RefreshCw, FileText, CheckCircle2, Send, Loader2 } from 'lucide-react';
+import { Plus, Pencil, Eye, EyeOff, ExternalLink, RefreshCw, FileText, CheckCircle2 } from 'lucide-react';
 import { supabase } from '../integrations/supabase/client';
-import { sendCrmEmail } from '../services/supabase';
-import { buildQuotationChoiceEmailHtml } from '../lib/quotationChoiceEmail';
 
 interface LeadQuotationPanelProps {
   lead: {
@@ -14,12 +12,8 @@ interface LeadQuotationPanelProps {
   selectedQuotationNo?: number | null;
   /** When the patient made that choice */
   selectedQuotationAt?: string | null;
-  /** When the quotation options email was sent (from patient_enquiries.quotation_choice.sent_at) */
-  optionsSentAt?: string | null;
   /** Staff fallback: record the patient's choice manually (e.g. patient told us by phone) */
   onSelectQuotation?: (quotation: { no: number; id: string; label: string; total: number; currency: string }) => void;
-  /** Called after the options email was sent successfully */
-  onOptionsSent?: (info: { token: string; sentAt: string }) => void;
   /** Re-reads the patient's choice from the database */
   onRefreshChoice?: () => void;
   readOnly?: boolean;
@@ -38,9 +32,7 @@ const LeadQuotationPanel: React.FC<LeadQuotationPanelProps> = ({
   lead,
   selectedQuotationNo = null,
   selectedQuotationAt = null,
-  optionsSentAt = null,
   onSelectQuotation,
-  onOptionsSent,
   onRefreshChoice,
   readOnly = false,
 }) => {
@@ -48,8 +40,6 @@ const LeadQuotationPanel: React.FC<LeadQuotationPanelProps> = ({
   const [loading, setLoading] = useState(false);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
-  const [sending, setSending] = useState(false);
-  const [sendMessage, setSendMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   // All quotation PDFs saved for this lead in the Quotations module, newest first
   useEffect(() => {
@@ -114,7 +104,6 @@ const LeadQuotationPanel: React.FC<LeadQuotationPanelProps> = ({
 
   const selectQuotation = (q: QuotationItem) => {
     if (readOnly || !onSelectQuotation) return;
-    setSendMessage(null);
     onSelectQuotation({
       no: numberFor(q),
       id: q.id,
@@ -122,67 +111,6 @@ const LeadQuotationPanel: React.FC<LeadQuotationPanelProps> = ({
       total: Number(q.total || 0),
       currency: q.currency,
     });
-  };
-
-  // Sends ALL quotations as options; the patient clicks the one they want in the email
-  const sendQuotationOptions = async () => {
-    if (quotations.length === 0) {
-      setSendMessage({ type: 'error', text: 'Create at least one quotation PDF first.' });
-      return;
-    }
-    if (!lead.email) {
-      setSendMessage({ type: 'error', text: 'This lead has no email address. Add one before sending.' });
-      return;
-    }
-    setSending(true);
-    setSendMessage(null);
-    try {
-      const options = quotations.map((q) => ({
-        no: numberFor(q),
-        id: q.id,
-        label: `Quotation ${numberFor(q)}`,
-        total: Number(q.total || 0),
-        currency: q.currency,
-        pdf_path: q.pdfPath,
-      }));
-
-      // 1. Store the options on the lead and get the secure token for the choice page
-      const { data: token, error: rpcError } = await supabase.rpc('create_quotation_choice_request', {
-        p_lead_id: lead.id,
-        p_options: options,
-      });
-      if (rpcError || !token) throw new Error(rpcError?.message || 'Could not create the quotation choice link.');
-
-      // 2. Email the options
-      const choiceBaseUrl = `${window.location.origin}${window.location.pathname}#/quotation-choice/${token}`;
-      const html = buildQuotationChoiceEmailHtml({
-        patientName: lead.name || 'Patient',
-        options: quotations.map((q) => ({
-          id: q.id,
-          label: `Quotation ${numberFor(q)}`,
-          total: Number(q.total || 0),
-          currency: q.currency,
-          pdfUrl: q.pdfUrl,
-        })),
-        choiceBaseUrl,
-      });
-      const result = await sendCrmEmail(
-        lead.email,
-        'Please choose your medical tourism quotation - WaruWenJo',
-        html,
-        lead.name || 'Patient',
-      );
-      if (!result.success) throw new Error(result.error || 'Email could not be sent');
-
-      const sentAt = new Date().toISOString();
-      setSendMessage({ type: 'success', text: `${quotations.length} quotation option(s) sent to ${lead.email}.` });
-      onOptionsSent?.({ token: String(token), sentAt });
-    } catch (e: any) {
-      console.error('Send quotation options failed:', e);
-      setSendMessage({ type: 'error', text: e?.message || 'Quotation options could not be sent.' });
-    } finally {
-      setSending(false);
-    }
   };
 
   const btnPrimary = 'flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 text-white rounded-lg text-[9px] font-black uppercase tracking-widest hover:bg-indigo-700 transition-all shadow-sm';
@@ -202,9 +130,11 @@ const LeadQuotationPanel: React.FC<LeadQuotationPanelProps> = ({
           >
             <RefreshCw size={12} /> Refresh
           </button>
-          <button onClick={() => openQuotations()} className={btnPrimary}>
-            <Plus size={12} /> Create Quotation
-          </button>
+          {!readOnly && (
+            <button onClick={() => openQuotations()} className={btnPrimary}>
+              <Plus size={12} /> Create Quotation
+            </button>
+          )}
         </div>
       </div>
 
@@ -274,7 +204,7 @@ const LeadQuotationPanel: React.FC<LeadQuotationPanelProps> = ({
         </>
       )}
 
-      {/* Options email + patient's choice status */}
+      {/* Patient's choice status (staff records it manually after calling the patient) */}
       {quotations.length > 0 && (
         <div className="p-5 bg-emerald-50 border border-emerald-100 rounded-2xl space-y-3">
           <p className="text-[9px] font-black text-emerald-700 uppercase tracking-widest">Patient Quotation Choice</p>
@@ -284,45 +214,24 @@ const LeadQuotationPanel: React.FC<LeadQuotationPanelProps> = ({
               ? chosenQuotation
                 ? `Patient chose: Quotation ${selectedQuotationNo} · ${chosenQuotation.currency} ${Number(chosenQuotation.total || 0).toLocaleString()}`
                 : `Patient chose Quotation ${selectedQuotationNo}, which is no longer in the list.`
-              : optionsSentAt
-                ? 'Waiting for the patient to choose one quotation from the email.'
-                : 'Email all quotations to the patient so they can choose one.'}
+              : 'No choice recorded yet. Call the patient, then select the quotation they chose.'}
           </p>
 
           <div className="flex items-center justify-between gap-3 flex-wrap">
             <p className="text-[10px] font-bold text-slate-500">
-              {optionsSentAt
-                ? `Options emailed to ${lead.email || 'patient'} on ${new Date(optionsSentAt).toLocaleString()}`
-                : 'Not emailed yet'}
-              {selectedQuotationAt && ` · Chosen on ${new Date(selectedQuotationAt).toLocaleString()}`}
+              {selectedQuotationAt
+                ? `Chosen on ${new Date(selectedQuotationAt).toLocaleString()}`
+                : 'Not recorded yet'}
             </p>
-            <div className="flex items-center gap-2 flex-wrap">
-              {onRefreshChoice && (
-                <button
-                  onClick={onRefreshChoice}
-                  className="flex items-center gap-1.5 px-3 py-2 bg-white text-emerald-700 border border-emerald-200 rounded-lg text-[9px] font-black uppercase tracking-widest hover:bg-emerald-100 transition-all"
-                >
-                  <RefreshCw size={12} /> Check patient's choice
-                </button>
-              )}
-              {!readOnly && (
-                <button
-                  onClick={sendQuotationOptions}
-                  disabled={sending}
-                  className="flex items-center gap-1.5 px-4 py-2 bg-emerald-600 text-white rounded-lg text-[9px] font-black uppercase tracking-widest hover:bg-emerald-700 transition-all shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {sending ? <Loader2 size={12} className="animate-spin" /> : <Send size={12} />}
-                  {sending ? 'Sending...' : optionsSentAt ? 'Resend quotation options' : 'Email quotation options'}
-                </button>
-              )}
-            </div>
+            {onRefreshChoice && (
+              <button
+                onClick={onRefreshChoice}
+                className="flex items-center gap-1.5 px-3 py-2 bg-white text-emerald-700 border border-emerald-200 rounded-lg text-[9px] font-black uppercase tracking-widest hover:bg-emerald-100 transition-all"
+              >
+                <RefreshCw size={12} /> Check patient's choice
+              </button>
+            )}
           </div>
-
-          {sendMessage && (
-            <p className={`text-[10px] font-bold ${sendMessage.type === 'success' ? 'text-emerald-700' : 'text-rose-600'}`}>
-              {sendMessage.text}
-            </p>
-          )}
         </div>
       )}
     </div>
