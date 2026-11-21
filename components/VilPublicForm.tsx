@@ -10,10 +10,9 @@ export const VIL_FILE_ITEMS = [
     help: '2 in × 2 in · JPEG · 10 KB – 1 MB · minimum 350 × 350 px · front-facing, plain white or light background.',
     photo: true,
   },
-  { key: 'medical_invitation', label: 'Medical invitation letter (system-generated, Indian hospital)', help: 'The letter issued by the hospital in India.' },
-  { key: 'proof_residence', label: 'Proof of residence (home country)', help: 'Any official document showing your current address.' },
-  { key: 'proof_occupation', label: 'Proof of occupation', help: 'Employment letter, business registration or similar.' },
-  { key: 'vaccination', label: 'Polio & Yellow Fever vaccination certificate', help: 'Both certificates in one file is fine.' },
+  { key: 'proof_residence', label: 'Proof of residence (home country)', help: 'Any official document showing your current address. You can add more than one file.' },
+  { key: 'proof_occupation', label: 'Proof of occupation', help: 'Employment letter, business registration or similar. You can add more than one file.' },
+  { key: 'vaccination', label: 'Polio & Yellow Fever vaccination certificate', help: 'Both certificates in one file is fine, or add them as separate files.' },
 ];
 
 export const VIL_TEXT_ITEMS = [
@@ -40,7 +39,7 @@ const SECTIONS = [
   { title: 'Personal details', icon: User, files: [] as string[], texts: ['identification_marks', 'education', 'residential_address'] },
   { title: 'Family details', icon: Users, files: [] as string[], texts: ['father_name', 'father_birthplace', 'mother_name', 'mother_birthplace', 'spouse_name', 'spouse_birthplace'] },
   { title: 'Occupation', icon: Briefcase, files: ['proof_occupation'], texts: ['employer_name', 'designation', 'employer_address'] },
-  { title: 'Residence & medical documents', icon: Plane, files: ['proof_residence', 'medical_invitation', 'vaccination'], texts: [] as string[] },
+  { title: 'Residence & medical documents', icon: Plane, files: ['proof_residence', 'vaccination'], texts: [] as string[] },
   { title: 'Reference in home country', icon: Phone, files: [] as string[], texts: ['reference_name', 'reference_address', 'reference_phone'] },
 ];
 
@@ -75,7 +74,7 @@ const validatePhoto = (file: File) =>
 
 export default function VilPublicForm({ leadId }: { leadId: string }) {
   const [text, setText] = useState<Record<string, string>>({});
-  const [files, setFiles] = useState<Record<string, File | null>>({});
+  const [files, setFiles] = useState<Record<string, File[]>>({});
   const [previews, setPreviews] = useState<Record<string, string>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
@@ -85,32 +84,43 @@ export default function VilPublicForm({ leadId }: { leadId: string }) {
 
   const totalFields = VIL_FILE_ITEMS.length + VIL_TEXT_ITEMS.length;
   const completed =
-    VIL_FILE_ITEMS.filter((i) => files[i.key]).length +
+    VIL_FILE_ITEMS.filter((i) => (files[i.key] || []).length > 0).length +
     VIL_TEXT_ITEMS.filter((i) => (text[i.key] || '').trim()).length;
   const percent = totalFields ? Math.round((completed / totalFields) * 100) : 0;
 
-  const handleFile = async (key: string, file: File | undefined, isPhoto: boolean) => {
-    if (!file) return;
+  // The photo is a single file (it is replaced); every other document field accepts several files.
+  const handleFiles = async (key: string, picked: FileList | File[] | null | undefined, isPhoto: boolean) => {
+    const list = Array.from(picked || []);
+    if (list.length === 0) return;
     if (isPhoto) {
+      const file = list[0];
       const err = await validatePhoto(file);
       if (err) {
         setErrors((e) => ({ ...e, [key]: err }));
-        setFiles((f) => ({ ...f, [key]: null }));
+        setFiles((f) => ({ ...f, [key]: [] }));
         return;
       }
       setPreviews((p) => {
         if (p[key]) URL.revokeObjectURL(p[key]);
         return { ...p, [key]: URL.createObjectURL(file) };
       });
+      setErrors((e) => ({ ...e, [key]: '' }));
+      setFiles((f) => ({ ...f, [key]: [file] }));
+      return;
     }
     setErrors((e) => ({ ...e, [key]: '' }));
-    setFiles((f) => ({ ...f, [key]: file }));
+    setFiles((f) => {
+      const current = f[key] || [];
+      const fresh = list.filter((file) => !current.some((c) => c.name === file.name && c.size === file.size));
+      return { ...f, [key]: [...current, ...fresh] };
+    });
   };
 
-  const removeFile = (key: string) => {
-    setFiles((f) => ({ ...f, [key]: null }));
+  const removeFile = (key: string, index: number) => {
+    setFiles((f) => ({ ...f, [key]: (f[key] || []).filter((_, i) => i !== index) }));
     setPreviews((p) => {
-      if (p[key]) URL.revokeObjectURL(p[key]);
+      if (!p[key]) return p;
+      URL.revokeObjectURL(p[key]);
       const next = { ...p };
       delete next[key];
       return next;
@@ -124,21 +134,24 @@ export default function VilPublicForm({ leadId }: { leadId: string }) {
     try {
       const documents: Record<string, unknown>[] = [];
       for (const item of VIL_FILE_ITEMS) {
-        const original = files[item.key];
-        if (!original) continue; // documents are optional
-        setProgress(`Uploading ${item.label}…`);
-        // Prefix the stored name so the CRM can match each upload to its VIL item.
-        const renamed = new File([original], `VIL_${item.key}__${original.name}`, { type: original.type });
-        const { data, error } = await uploadEnquiryDocument(leadId, renamed);
-        if (error || !data) throw new Error(`Could not upload ${item.label}: ${error?.message || 'unknown error'}`);
-        documents.push({
-          field: item.key,
-          file_name: data.file_name,
-          file_path: data.file_path,
-          file_url: data.file_url,
-          mime_type: data.mime_type,
-          file_size: data.file_size,
-        });
+        const selected = files[item.key] || [];
+        if (selected.length === 0) continue; // documents are optional
+        for (let index = 0; index < selected.length; index++) {
+          const original = selected[index];
+          setProgress(`Uploading ${item.label}${selected.length > 1 ? ` (${index + 1} of ${selected.length})` : ''}…`);
+          // Prefix the stored name so the CRM can match each upload to its VIL item.
+          const renamed = new File([original], `VIL_${item.key}__${original.name}`, { type: original.type });
+          const { data, error } = await uploadEnquiryDocument(leadId, renamed);
+          if (error || !data) throw new Error(`Could not upload ${item.label}: ${error?.message || 'unknown error'}`);
+          documents.push({
+            field: item.key,
+            file_name: data.file_name,
+            file_path: data.file_path,
+            file_url: data.file_url,
+            mime_type: data.mime_type,
+            file_size: data.file_size,
+          });
+        }
       }
 
       setProgress('Saving your form…');
@@ -176,8 +189,11 @@ export default function VilPublicForm({ leadId }: { leadId: string }) {
 
   const renderFile = (key: string) => {
     const item = FILE_BY_KEY[key];
-    const file = files[key];
+    const selected = files[key] || [];
     const preview = previews[key];
+    const multiple = !item.photo;
+    // The photo is one file, so its picker disappears once a photo is chosen. Other fields keep an "add more" picker.
+    const showPicker = multiple || selected.length === 0;
     return (
       <div key={key} id={`vil-${key}`} className="space-y-2">
         <div>
@@ -187,8 +203,8 @@ export default function VilPublicForm({ leadId }: { leadId: string }) {
           {item.help && <p className="text-[11px] text-slate-500 mt-0.5">{item.help}</p>}
         </div>
 
-        {file ? (
-          <div className="flex items-center gap-4 p-4 rounded-2xl border border-teal-200 bg-teal-50/60">
+        {selected.map((file, index) => (
+          <div key={`${file.name}-${file.size}-${index}`} className="flex items-center gap-4 p-4 rounded-2xl border border-teal-200 bg-teal-50/60">
             {preview ? (
               <img src={preview} alt="Photo preview" className="w-16 h-16 rounded-lg object-cover border border-white shadow-sm" />
             ) : (
@@ -202,30 +218,37 @@ export default function VilPublicForm({ leadId }: { leadId: string }) {
             </div>
             <button
               type="button"
-              onClick={() => removeFile(key)}
+              onClick={() => removeFile(key, index)}
               disabled={submitting}
               className="p-2 rounded-lg text-slate-500 hover:bg-white disabled:opacity-50"
-              aria-label="Remove file"
+              aria-label={`Remove ${file.name}`}
             >
               <X size={16} />
             </button>
           </div>
-        ) : (
+        ))}
+
+        {showPicker && (
           <label
-            className={`flex flex-col items-center justify-center gap-1 p-6 rounded-2xl border-2 border-dashed cursor-pointer transition-colors ${
+            className={`flex flex-col items-center justify-center gap-1 ${selected.length > 0 ? 'p-4' : 'p-6'} rounded-2xl border-2 border-dashed cursor-pointer transition-colors ${
               errors[key] ? 'border-rose-300 bg-rose-50/40' : 'border-slate-200 bg-slate-50 hover:border-indigo-300 hover:bg-indigo-50/40'
             } ${submitting ? 'opacity-50 pointer-events-none' : ''}`}
           >
             <Upload size={20} className="text-indigo-500" />
-            <span className="text-xs font-bold text-indigo-700">Choose file</span>
-            <span className="text-[10px] text-slate-400">{item.photo ? 'JPEG only' : 'JPG, PNG or PDF'}</span>
+            <span className="text-xs font-bold text-indigo-700">
+              {item.photo ? 'Choose file' : selected.length > 0 ? 'Add more files' : 'Choose files'}
+            </span>
+            <span className="text-[10px] text-slate-400">
+              {item.photo ? 'JPEG only' : 'JPG, PNG or PDF · you can select several files'}
+            </span>
             <input
               type="file"
               className="hidden"
+              multiple={multiple}
               accept={item.photo ? 'image/jpeg' : 'image/*,application/pdf'}
               disabled={submitting}
               onChange={(e) => {
-                handleFile(key, e.target.files?.[0], !!item.photo);
+                handleFiles(key, e.target.files, !!item.photo);
                 e.target.value = '';
               }}
             />

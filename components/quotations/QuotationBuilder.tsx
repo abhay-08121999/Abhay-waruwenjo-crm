@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { supabase } from '../../integrations/supabase/client';
 import { ArrowLeft, Save, Send, Plus, Trash2, FileText, ChevronDown, Upload, CheckCircle, Eye, X, Printer } from 'lucide-react';
 import { jsPDF } from 'jspdf';
@@ -64,6 +64,11 @@ interface QuotationBuilderProps {
 
 const QuotationBuilder: React.FC<QuotationBuilderProps> = ({ quotationId, onBack, initialPreview = false, initialLeadId = null }) => {
   const [loading, setLoading] = useState(false);
+  // Blocks a second Send while one is already running, so repeated clicks cannot send the patient duplicates.
+  const sendingRef = useRef(false);
+  const [sending, setSending] = useState(false);
+  // Last send failure. Shown in a banner that stays on screen until the next attempt, because toasts disappear.
+  const [sendError, setSendError] = useState<string | null>(null);
   const [leads, setLeads] = useState<any[]>([]);
   const [templates, setTemplates] = useState<any[]>([]);
   const [uploading, setUploading] = useState(false);
@@ -295,7 +300,9 @@ const QuotationBuilder: React.FC<QuotationBuilderProps> = ({ quotationId, onBack
       return qId;
     } catch (err: any) {
       console.error('Save quotation error:', err);
-      toast.error(`Failed to save quotation: ${err?.message || 'unknown error'}`);
+      const message = `Failed to save quotation: ${err?.message || 'unknown error'}`;
+      setSendError(message);
+      toast.error(message, { duration: 15000 });
       return null;
     } finally {
       setLoading(false);
@@ -312,10 +319,12 @@ const QuotationBuilder: React.FC<QuotationBuilderProps> = ({ quotationId, onBack
     }
   }, [uploadTrigger]);
 
-  const handleSend = async () => {
+  const sendQuotationNow = async () => {
     const recipient = leads.find(l => l.id === leadId);
     if (!recipient?.email) {
-      toast.error('Select a patient that has an email address before sending.');
+      const message = 'Select a patient that has an email address before sending.';
+      setSendError(message);
+      toast.error(message, { duration: 10000 });
       return;
     }
 
@@ -330,7 +339,9 @@ const QuotationBuilder: React.FC<QuotationBuilderProps> = ({ quotationId, onBack
       
       const selectedTemplate = templates.find(t => t.id === templateId);
       if (!selectedTemplate) {
-        toast.error('Please select a template first');
+        const message = 'Please select a template first.';
+        setSendError(message);
+        toast.error(message, { duration: 10000 });
         return;
       }
 
@@ -339,7 +350,9 @@ const QuotationBuilder: React.FC<QuotationBuilderProps> = ({ quotationId, onBack
       let html = templateData?.html_content || '';
       
       if (!html) {
-        toast.error('Template has no content');
+        const message = 'The selected template has no content.';
+        setSendError(message);
+        toast.error(message, { duration: 10000 });
         return;
       }
 
@@ -376,13 +389,18 @@ const QuotationBuilder: React.FC<QuotationBuilderProps> = ({ quotationId, onBack
       container.style.backgroundColor = 'white';
       document.body.appendChild(container);
       
-      const canvas = await html2canvas(container, {
-        scale: 2,
-        useCORS: true,
-        logging: false,
-        allowTaint: true,
-        backgroundColor: '#ffffff'
-      });
+      let canvas: HTMLCanvasElement;
+      try {
+        canvas = await html2canvas(container, {
+          scale: 2,
+          useCORS: true,
+          logging: false,
+          allowTaint: true,
+          backgroundColor: '#ffffff'
+        });
+      } finally {
+        if (container.parentNode) document.body.removeChild(container);
+      }
       
       const imgData = canvas.toDataURL('image/png');
       const imgWidth = 210;
@@ -390,7 +408,6 @@ const QuotationBuilder: React.FC<QuotationBuilderProps> = ({ quotationId, onBack
       
       doc.addImage(imgData, 'PNG', 0, 0, imgWidth, imgHeight);
       const pdfBlob = doc.output('blob');
-      document.body.removeChild(container);
 
       // Store the PDF with the quotation so the patient lead can show it
       const pdfPath = `${qId}/quotation-${Date.now()}.pdf`;
@@ -406,11 +423,21 @@ const QuotationBuilder: React.FC<QuotationBuilderProps> = ({ quotationId, onBack
       if (updateError) throw updateError;
 
       // Email the quotation PDF to the patient (no download)
-      await sendQuotationEmail({
-        toEmail: recipient.email,
-        toName: patientName,
-        pdfBase64: doc.output('datauristring').split(',')[1],
-      });
+      // The mail server sometimes refuses the first attempt, so retry before reporting a failure.
+      const pdfBase64 = doc.output('datauristring').split(',')[1];
+      let emailError: any = null;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          await sendQuotationEmail({ toEmail: recipient.email, toName: patientName, pdfBase64 });
+          emailError = null;
+          break;
+        } catch (err) {
+          emailError = err;
+          console.warn(`Quotation email attempt ${attempt} failed:`, err);
+          if (attempt < 3) await new Promise(resolve => setTimeout(resolve, 1500 * attempt));
+        }
+      }
+      if (emailError) throw new Error(`Email could not be sent after 3 attempts: ${emailError?.message || 'unknown error'}`);
 
       await supabase.from('quotations').update({ status: 'sent' }).eq('id', qId);
 
@@ -418,9 +445,24 @@ const QuotationBuilder: React.FC<QuotationBuilderProps> = ({ quotationId, onBack
       onBack();
     } catch (err: any) {
       console.error('Error sending quotation:', err);
-      toast.error(`Failed to send quotation: ${err?.message || 'unknown error'}`);
+      const message = `Failed to send quotation: ${err?.message || 'unknown error'}`;
+      setSendError(message);
+      toast.error(message, { duration: 15000 });
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleSend = async () => {
+    if (sendingRef.current) return;
+    sendingRef.current = true;
+    setSending(true);
+    setSendError(null);
+    try {
+      await sendQuotationNow();
+    } finally {
+      sendingRef.current = false;
+      setSending(false);
     }
   };
 
@@ -727,13 +769,20 @@ const QuotationBuilder: React.FC<QuotationBuilderProps> = ({ quotationId, onBack
           </button>
           <button 
             onClick={handleSend}
-            disabled={loading}
-            className="flex items-center gap-2 px-6 py-2.5 bg-teal-600 text-white font-bold rounded-xl hover:bg-teal-700 transition-all shadow-lg shadow-teal-500/20"
+            disabled={loading || sending}
+            className="flex items-center gap-2 px-6 py-2.5 bg-teal-600 text-white font-bold rounded-xl hover:bg-teal-700 transition-all shadow-lg shadow-teal-500/20 disabled:opacity-60 disabled:cursor-not-allowed"
           >
-            <Send size={18} /> Send to Patient
+            <Send size={18} /> {sending ? 'Sending…' : 'Send to Patient'}
           </button>
         </div>
       </div>
+
+      {sendError && (
+        <div role="alert" className="flex items-start justify-between gap-4 px-6 py-3 bg-red-50 border-b border-red-200 text-sm font-bold text-red-700">
+          <span>{sendError}</span>
+          <button onClick={() => setSendError(null)} className="shrink-0 text-red-400 hover:text-red-600" aria-label="Dismiss error"><X size={16} /></button>
+        </div>
+      )}
 
       <div className="flex-1 flex flex-col lg:flex-row overflow-hidden">
         {/* Left Panel: Settings & Details */}
@@ -1074,6 +1123,7 @@ const QuotationBuilder: React.FC<QuotationBuilderProps> = ({ quotationId, onBack
                   Close & Edit
                 </button>
                 <button
+                  disabled={sending}
                   onClick={() => { setShowPreview(false); handleSend(); }}
                   style={{
                     display: 'flex', alignItems: 'center', gap: '8px',

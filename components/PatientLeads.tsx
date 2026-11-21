@@ -72,6 +72,58 @@ const IN_HOUSE_DOCTOR_VIEW_STAGES = [3, 4, 5];
 // BDMs can see Stage 4 and 5 but cannot edit them; those stages belong to the in-house doctor.
 const BDM_READ_ONLY_STAGES = [4, 5];
 
+// Text fields that save to the lead. What is typed stays in local state so typing is instant; the change is
+// sent to the (slow) save only after a short pause, when the field loses focus, or when it is removed.
+const makeDraftField = (Tag: 'textarea' | 'input') => {
+  const DraftField: React.FC<any> = ({ value, onChange, onBlur, onFocus, ...rest }) => {
+    const [draft, setDraft] = useState<string>(value ?? '');
+    const focused = useRef(false);
+    const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+    // The change event and the handler of the render it was typed in, so a late save still goes to the right lead.
+    const pending = useRef<{ event: any; handler: ((e: any) => void) | undefined } | null>(null);
+
+    useEffect(() => {
+      if (!focused.current && !timer.current) setDraft(value ?? '');
+    }, [value]);
+
+    const flush = () => {
+      if (timer.current) { clearTimeout(timer.current); timer.current = null; }
+      const job = pending.current;
+      pending.current = null;
+      if (job?.handler) job.handler(job.event);
+    };
+
+    useEffect(() => () => flush(), []);
+
+    return React.createElement(Tag, {
+      ...rest,
+      value: draft,
+      onFocus: (e: any) => { focused.current = true; onFocus?.(e); },
+      onChange: (e: any) => {
+        setDraft(e.target.value);
+        pending.current = { event: e, handler: onChange };
+        if (timer.current) clearTimeout(timer.current);
+        timer.current = setTimeout(flush, 600);
+      },
+      onBlur: (e: any) => { focused.current = false; flush(); onBlur?.(e); },
+    });
+  };
+  return DraftField;
+};
+const DraftTextarea = makeDraftField('textarea');
+const DraftInput = makeDraftField('input');
+
+// The MOM date picker stores 'YYYY-MM-DDTHH:mm'. Older records hold free text, which the picker cannot show.
+const MOM_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/;
+const formatMomDateTime = (value: unknown) => {
+  const text = String(value || '');
+  if (!MOM_DATE_PATTERN.test(text)) return text;
+  const date = new Date(text);
+  return Number.isNaN(date.getTime())
+    ? text
+    : date.toLocaleString('en-GB', { day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+};
+
 const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   // In-House Doctor can only work on stages 3, 4 and 5.
   const isInHouseDoctorOnly =
@@ -87,7 +139,13 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   const hasAnyRole = (...names: string[]) =>
     roles.some(role => names.includes(normalizeRoleKey(role.key)) || names.includes(normalizeRoleKey(role.name)));
   // BDMs can open and work every patient lead stage (1 to 9), including Stage 4 (Doctor Inbox) and Stage 5 (Clinical).
-  const isBdmUser = hasAnyRole('bdm') && !hasAnyRole('superadmin', 'admin');
+  // Match the BDM role by key or display name, tolerating variants such as "BDM", "bdm_team" or "Business Development Manager".
+  const isBdmRole = (role: { key?: string; name?: string }) =>
+    [role.key, role.name].some(value => {
+      const normalized = normalizeRoleKey(String(value || ''));
+      return normalized === 'bdm' || normalized.startsWith('bdm') || normalized.includes('businessdevelopment');
+    });
+  const isBdmUser = roles.some(isBdmRole) && !hasAnyRole('superadmin', 'admin');
   const BDM_STAGE_IDS = [1, 2, 3, 4, 5, 6, 7, 8, 9];
   // Only the BDM granted a lead in the Lead Access Manager may edit it. Other BDMs can still view it.
   const { restricted: restrictedBdm, isGranted } = useLeadGrants(roles);
@@ -139,7 +197,6 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   
   // Modal States
   const [showModal, setShowModal] = useState(false);
-  const [showConsultationModal, setShowConsultationModal] = useState(false);
   const [showDetailPane, setShowDetailPane] = useState(false);
   
   const [selectedLead, setSelectedLead] = useState<Lead | null>(null);
@@ -151,7 +208,6 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   // True when this BDM is not assigned or granted the open lead: it can be viewed but not changed.
   const activeLeadLocked = showDetailPane && !!selectedLead && isLeadLocked(selectedLead.id);
 
-  const [selectedDoctorId, setSelectedDoctorId] = useState('');
   const [newLead, setNewLead] = useState<Partial<Lead>>({
     status: LeadStatus.NEW,
     urgency: 'Standard',
@@ -174,6 +230,8 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   // View-only browsing: a role that can only read the lead's own stage may still look at its other
   // readable stages. This never moves the lead and never allows edits.
   const [isViewOnlyStage, setIsViewOnlyStage] = useState(false);
+  // Pop-up shown when the in-house doctor finalizes Stage 5 and the lead is handed to the BDM for Stage 6.
+  const [showStage5Complete, setShowStage5Complete] = useState(false);
   const isStageReadOnly = !canWriteStage(activeWorkflowStage) || isViewOnlyStage;
   const detailScrollRef = useRef<HTMLDivElement>(null);
   // Opens a lead from a card or row. Clears the previous lead first, so the detail pane always
@@ -225,8 +283,8 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
     { id: 3, name: 'Medical Documents', label: 'Documents', tasks: ['Explain Patient Process & Send Medical Document Request Email', 'Receive Medical Documents'], statusMapping: LeadStatus.CONTACTED },
     { id: 4, name: 'In-House Doctor Interaction', label: 'Doctor Inbox', tasks: ['Record Doctor Call Notes', 'Send Personal Email to Patient', 'Complete In-House Doctor Interaction'], statusMapping: LeadStatus.CONTACTED },
     { id: 5, name: 'Clinical Qualification & Planning', label: 'Clinical', tasks: ['Suggest Hospitals & Surgeons/Specialists', 'Finalize Clinical Recommendation & Confirm Clinical Review', 'Generate Clinical Report'], statusMapping: LeadStatus.QUALIFIED },
-    { id: 6, name: 'Financial & Logistics Proposal', label: 'BDM Pipeline', tasks: ['Generate Financial Proposal', 'Discuss Travel & Accommodation', 'Address Patient Concerns', 'Generate Proposal PDF', 'Send Proposal Via Mail', 'Confirm Patient Interest Via Call'], statusMapping: LeadStatus.QUALIFIED },
-    { id: 7, name: 'Specialist Consultation, Payment & Confirmation', label: 'Specialist Consult & Payment', tasks: ['Specialist Doctor Call', 'Record MOM', 'BDM Calls Patient', 'Confirm Quotation Agreement', 'Confirm Clinical Process Agreement', 'Record Patient Decision', 'Request Patient to Proceed'], statusMapping: LeadStatus.QUALIFIED },
+    { id: 6, name: 'Financial & Logistics Proposal', label: 'BDM Pipeline', tasks: ['Generate Financial Proposal', 'Discuss Travel & Accommodation', 'Address Patient Concerns', 'Send Proposal Via Mail', 'Confirm Patient Interest Via Call'], statusMapping: LeadStatus.QUALIFIED },
+    { id: 7, name: 'Specialist Consultation, Medical Visa Application Form', label: 'Specialist Consult & Visa Form', tasks: ['Specialist Doctor Call & MOM', 'BDM Calls Patient', 'Confirm Patient Agreement', 'Request Patient to Proceed'], statusMapping: LeadStatus.QUALIFIED },
     { id: 8, name: 'Medical Case Handover', label: 'CDM/WaruBuddy Handover', tasks: ['Collect Advance Payment', 'Create Patient Account & Medical Case', 'Handover to CDM/WaruBuddy', 'Complete Stage 8'], statusMapping: LeadStatus.WON },
     { id: 9, name: 'Lost / Dropped', label: 'Archived', tasks: ['Select Drop-off Reason', 'Archive Lead'], statusMapping: LeadStatus.LOST }
   ];
@@ -418,6 +476,17 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
         if (has('Complete Stage 8')) merged8.push('Complete Stage 8');
         hydratedState.stage8_checklist = Array.from(new Set([...oldStage8.filter(task => merged8.includes(task)), ...merged8]));
       }
+      // Stage 7 merged checklist: carry over ticks from the old, longer checklist.
+      {
+        const oldStage7: string[] = Array.isArray(hydratedState.stage7_checklist) ? hydratedState.stage7_checklist : [];
+        const all = (...names: string[]) => names.every(name => oldStage7.includes(name));
+        const merged7: string[] = [];
+        if (all('Specialist Doctor Call', 'Record MOM')) merged7.push('Specialist Doctor Call & MOM');
+        if (oldStage7.includes('BDM Calls Patient')) merged7.push('BDM Calls Patient');
+        if (all('Confirm Quotation Agreement', 'Confirm Clinical Process Agreement', 'Record Patient Decision')) merged7.push('Confirm Patient Agreement');
+        if (oldStage7.includes('Request Patient to Proceed')) merged7.push('Request Patient to Proceed');
+        hydratedState.stage7_checklist = Array.from(new Set([...oldStage7, ...merged7]));
+      }
       const normalizedStageChecklists = Object.fromEntries(
         STAGES.map(stage => [
           `stage${stage.id}_checklist`,
@@ -507,7 +576,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
       stage4: stage(4, 'In-House Doctor Interaction', 'Doctor Inbox', 'stage4_checklist', ['assigned_doctor_name', 'doctor_inbox_status', 'doctor_assigned_at', 'doctor_call_notes', 'doctor_call_at', 'personal_email_sent_at', 'initial_doctor_assessment', 'doctor_next_steps', 'doctor_interaction_complete', 'doctor_call_notes_saved_at', 'initial_doctor_assessment_saved_at']),
       stage5: stage(5, 'Clinical Qualification & Planning', 'Clinical', 'stage5_checklist', ['suggested_hospital', 'suggested_hospital_id', 'suggested_surgeon', 'suggested_surgeon_id', 'suggested_hospitals', 'suggested_surgeons', 'suggested_procedures', 'illness_history', 'clinical_summary', 'clinical_recommendation_finalized', 'clinical_review_confirmed', 'clinical_review_confirmed_at', 'clinical_review_confirmed_by', 'clinical_decision', 'clinical_report_generated_at']),
       stage6: stage(6, 'Financial & Logistics Proposal', 'BDM Pipeline', 'stage6_checklist', ['quotation_details', 'quotation_items', 'travel_accommodation', 'patient_concerns', 'financial_proposal_pdf', 'proposal_sent_at', 'patient_interest', 'patient_interest_reason', 'estimated_cost_min', 'estimated_cost_max', 'estimated_cost_currency', 'estimated_cost_notes', 'specialist_consultation_booked']),
-      stage7: stage(7, 'Specialist Consultation, Payment & Confirmation', 'Specialist Consult & Payment', 'stage7_checklist', ['specialist_call_completed_at', 'specialist_call_notes', 'mom_date_time', 'mom_participants', 'mom_discussion_points', 'mom_specialist_observations', 'mom_patient_questions', 'mom_decisions', 'mom_next_steps', 'mom_instructions', 'mom_recorded_at', 'mom_pdf_path', 'mom_pdf_url', 'bdm_call_completed_at', 'bdm_call_notes', 'quotation_agreement_confirmed', 'clinical_process_agreement_confirmed', 'stage7_patient_decision', 'stage7_disagreement_reason', 'stage7_disagreement_concern', 'stage7_disagreement_followup', 'request_to_proceed_confirmed', 'request_to_proceed_at', 'vil_form_sent_at', 'visa_application_sent_at', 'visa_application_created', 'visa_application_created_at', 'visa_document_path', 'visa_document_name', 'visa_document_uploaded_at']),
+      stage7: stage(7, 'Specialist Consultation, Medical Visa Application Form', 'Specialist Consult & Visa Form', 'stage7_checklist', ['specialist_call_completed_at', 'specialist_call_notes', 'mom_date_time', 'mom_participants', 'mom_discussion_points', 'mom_specialist_observations', 'mom_patient_questions', 'mom_decisions', 'mom_next_steps', 'mom_instructions', 'mom_recorded_at', 'mom_pdf_path', 'mom_pdf_url', 'bdm_call_completed_at', 'bdm_call_notes', 'quotation_agreement_confirmed', 'clinical_process_agreement_confirmed', 'stage7_patient_decision', 'stage7_disagreement_reason', 'stage7_disagreement_concern', 'stage7_disagreement_followup', 'request_to_proceed_confirmed', 'request_to_proceed_at', 'vil_form_sent_at', 'visa_application_sent_at', 'visa_application_created', 'visa_application_created_at', 'visa_document_path', 'visa_document_name', 'visa_document_uploaded_at']),
       stage8: stage(8, 'Medical Case Handover', 'CDM/WaruBuddy Handover', 'stage8_checklist', ['payment_link', 'payment_reference', 'payment_link_provided_at', 'payment_status', 'payment_date_time', 'payment_amount', 'advance_payment_verified', 'medical_case_id', 'converted_at', 'handover_prepared_at', 'patient_user_id', 'patient_patient_id', 'patient_account_created_at', 'patient_account_status', 'patient_account_error', 'patient_invitation_sent_at', 'handover_bdm_name', 'handover_cdm_team', 'handover_status', 'handover_case_information', 'clinical_information_shared', 'financial_information_shared', 'specialist_mom_information_shared', 'handover_initiated_at', 'handover_accepted_at', 'case_ownership_confirmed_at', 'stage8_completed_at']),
       stage9: stage(9, 'Lost / Dropped', 'Archived', 'stage9_checklist', ['dropoff_reason', 'archived_at', 'dropped_from_stage', 'dropped_at', 'resume_stage']),
     };
@@ -575,21 +644,30 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
       return;
     }
 
-    // Read-only on the lead's own stage: switch the view only, never move the lead or save anything.
+    // The lead currently sits in a stage this user cannot write (e.g. the in-house doctor's Stage 4/5).
+    // Switch the view only and never move the lead. Stages the user can write that the lead has already
+    // reached (e.g. Stages 1-3 for a BDM) stay editable; stages the lead has not reached yet stay view-only.
+    // Stages the user has no write access to are read-only through canWriteStage().
     const leadOwnStage = Number(selectedLead.workflowStage) || 1;
-    if (!canWriteStage(leadOwnStage)) {
+    // Stage 5 belongs to the in-house doctor, but once its checklist is complete the lead moves on to
+    // Stage 6 (BDM Pipeline). The assigned BDM may take the lead over at that point, so it never gets
+    // stuck in Stage 5 with nobody able to move it.
+    const bdmTakesOverFromStage5 =
+      isBdmUser && !activeLeadLocked && leadOwnStage === 5 && stage === 6 && validateStage(5);
+    if (!canWriteStage(leadOwnStage) && !bdmTakesOverFromStage5) {
       setActiveWorkflowStage(stage);
-      setIsViewOnlyStage(stage !== leadOwnStage);
+      setIsViewOnlyStage(stage > leadOwnStage);
       return;
     }
 
     // Moving a lead out of a stage needs write access to the stage it is currently in.
-    if (blockReadOnlyWrite(activeWorkflowStage)) return;
+    if (!bdmTakesOverFromStage5 && blockReadOnlyWrite(activeWorkflowStage)) return;
     setIsViewOnlyStage(false);
 
     // Allow jumping to Stage 9 (Lost / Dropped) from anywhere without validation
-    if (stage > activeWorkflowStage && stage !== 9) {
-      for (let i = activeWorkflowStage; i < stage; i++) {
+    const validateFromStage = bdmTakesOverFromStage5 ? leadOwnStage : activeWorkflowStage;
+    if (stage > validateFromStage && stage !== 9) {
+      for (let i = validateFromStage; i < stage; i++) {
         if (!validateStage(i)) {
           toast.error(`Please complete all checklist items for Stage ${i} before progressing.`);
           return;
@@ -980,7 +1058,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
 
       // Numbered agenda sections
       MOM_FIELDS.forEach(([field, label], index) => {
-        const value = String(state?.[field] || '-');
+        const value = field === 'mom_date_time' ? formatMomDateTime(state?.[field] || '-') : String(state?.[field] || '-');
         const lines = momDoc.splitTextToSize(value, contentWidth - 4);
         ensureSpace(14);
         momDoc.setFont('helvetica', 'bold');
@@ -2502,19 +2580,37 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
       window.open(doc.output('bloburl'), '_blank');
       
       await saveStage6Task('Generate Financial Proposal');
-      await saveStage6Task('Generate Proposal PDF');
     } catch (err) {
       toast.error('Failed to generate PDF', { id: 'prop_gen' });
     }
   };
 
+  // Completes Stage 5 and hands the lead to the BDM. This writes the lead's stage directly instead of going
+  // through handleStageJump, because the in-house doctor has no access to Stage 6 and that jump would be refused.
   const finalizeClinicalReview = async (lead: Lead) => {
-    toast.loading(`Finalizing clinical review...`, { id: 'finalize_toast' });
-    // This just moves to Stage 6 now without sending slots
-    setTimeout(() => {
-      toast.success(`Review complete. Moving to Negotiation stage.`, { id: 'finalize_toast' });
-      handleStageJump(6);
-    }, 1000);
+    if (denyIfLeadLocked(lead.id)) return;
+    if (blockReadOnlyWrite(5)) return;
+    if (isUpdatingWorkflow) return;
+    const stage6 = STAGES.find(s => s.id === 6);
+    setIsUpdatingWorkflow(true);
+    const { error } = await updateLeadWorkflow(lead.id, 6, stage6?.statusMapping);
+    setIsUpdatingWorkflow(false);
+    if (error) {
+      console.error('Stage 5 completion failed:', error);
+      toast.error(`Could not complete Stage 5: ${error.message || 'permission denied'}`);
+      return;
+    }
+    await logAdminActivity(
+      'Stage 5 Completed: Clinical review finalized, lead handed to BDM for Stage 6',
+      'Patient Lead',
+      lead.id,
+      { stage: 5, next_stage: 6 }
+    );
+    loadActivityLogs(lead.id);
+    await loadLeads();
+    // Roles with Stage 6 access continue there; the in-house doctor stays on Stage 5.
+    if (canAccessStage(6)) setActiveWorkflowStage(6);
+    setShowStage5Complete(true);
   };
 
   const sendMeetingSlots = async (lead: Lead) => {
@@ -2889,26 +2985,18 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
     setIsConvertingToCase(false);
   };
 
-  const handleScheduleConsultation = async () => {
+  // Stage 6 -> Stage 7. No specialist is picked here any more: the lead goes straight to Stage 7.
+  const handleProceedToSpecialistStage = async () => {
     if (denyIfLeadLocked()) return;
-    if (!selectedDoctorId || !selectedLead) return;
+    if (!selectedLead) return;
     if (blockReadOnlyWrite(activeWorkflowStage)) return;
-
-    const { error } = await createConsultationFromEnquiry(
-      selectedLead.id,
-      selectedDoctorId,
-      'Initial Assessment'
-    );
-
-    if (error) {
-      console.warn("Backend error bypassed for demo:", error);
-      await updateLeadStatus(selectedLead.id, 'contacted');
+    if (!validateStage(6)) {
+      toast.error('Please complete all Stage 6 checklist items first.');
+      return;
     }
-    
-    toast.success('Specialist consultation booked; moving to Stage 7');
+
     await persistWorkflowPatch({ specialist_consultation_booked: true });
-    setShowConsultationModal(false);
-    handleStageJump(7); // Auto-advance to Follow-up Pending
+    await handleStageJump(7);
   };
 
   const LeadCard: React.FC<{ lead: Lead }> = ({ lead }) => (
@@ -3341,7 +3429,15 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                 <div className="rounded-2xl border border-amber-200 bg-amber-50 px-5 py-3 text-xs font-black uppercase tracking-widest text-amber-800">
                   {activeLeadLocked
                     ? 'Only the BDM assigned to this lead can make changes. You can view it.'
-                    : 'Read-only access: you can view this stage but cannot make changes.'}
+                    : isViewOnlyStage
+                      ? (Number(selectedLead?.workflowStage) === 5 && activeWorkflowStage === 6
+                        ? 'Stage 5 (in-house doctor) is not complete yet. Once every Stage 5 item is ticked, click Stage 6 to take over.'
+                        : 'View-only: the lead has not reached this stage yet, so it cannot be changed.')
+                      : isBdmUser && BDM_READ_ONLY_STAGES.includes(activeWorkflowStage)
+                        ? 'This stage belongs to the in-house doctor. You can view it but cannot make changes.'
+                        : customStageAccess && !customStageAccess.write.has(activeWorkflowStage)
+                          ? `Your role has Read-only permission for Stage ${activeWorkflowStage}. Ask an admin to tick Write for this stage.`
+                          : 'Read-only access: you can view this stage but cannot make changes.'}
                 </div>
               )}
 
@@ -3477,7 +3573,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
 
                              <div>
                                 <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest pl-1">Detailed Requirements</label>
-                                <textarea 
+                                <DraftTextarea 
                                    className="w-full mt-2 p-4 bg-white border border-slate-100 rounded-2xl text-xs font-medium min-h-[100px] outline-none"
                                    placeholder="Patient specific needs, special requests, and detailed health goals..."
                                    value={localWorkflowState?.discovery_requirements || ''}
@@ -3675,7 +3771,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                                     <span className="text-[9px] font-bold text-slate-400">Saved {new Date(localWorkflowState.doctor_call_notes_saved_at).toLocaleString()}</span>
                                   )}
                                 </div>
-                                <textarea value={localWorkflowState?.doctor_call_notes || ''} onChange={(e) => handleUpdateSummary('doctor_call_notes', e.target.value)} placeholder="Record medical condition, history, concerns, expectations, and questions..." className="w-full p-3 bg-slate-50 border border-slate-100 rounded-xl text-xs min-h-[120px] outline-none" />
+                                <DraftTextarea value={localWorkflowState?.doctor_call_notes || ''} onChange={(e) => handleUpdateSummary('doctor_call_notes', e.target.value)} placeholder="Record medical condition, history, concerns, expectations, and questions..." className="w-full p-3 bg-slate-50 border border-slate-100 rounded-xl text-xs min-h-[120px] outline-none" />
                                 <button onClick={handleSaveDoctorCallNotes} className="w-full p-3 bg-teal-600 text-white rounded-xl font-black text-[10px] uppercase tracking-widest hover:bg-teal-700 transition-all">Save Doctor Call Notes</button>
                              </div>
                              <div className="p-5 bg-indigo-50/70 border border-indigo-100 rounded-3xl space-y-4">
@@ -3687,11 +3783,11 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                                 </div>
                                 <div className="space-y-2">
                                   <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest pl-1">Assessment</label>
-                                  <textarea value={localWorkflowState?.initial_doctor_assessment || ''} onChange={(e) => handleUpdateSummary('initial_doctor_assessment', e.target.value)} placeholder="Initial assessment of the patient's condition..." className="w-full p-3 bg-white border border-indigo-100 rounded-xl text-xs min-h-[110px] outline-none" />
+                                  <DraftTextarea value={localWorkflowState?.initial_doctor_assessment || ''} onChange={(e) => handleUpdateSummary('initial_doctor_assessment', e.target.value)} placeholder="Initial assessment of the patient's condition..." className="w-full p-3 bg-white border border-indigo-100 rounded-xl text-xs min-h-[110px] outline-none" />
                                 </div>
                                 <div className="space-y-2">
                                   <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest pl-1">Recommended Next Steps</label>
-                                  <textarea value={localWorkflowState?.doctor_next_steps || ''} onChange={(e) => handleUpdateSummary('doctor_next_steps', e.target.value)} placeholder="Recommended next steps for the patient..." className="w-full p-3 bg-white border border-indigo-100 rounded-xl text-xs min-h-[90px] outline-none" />
+                                  <DraftTextarea value={localWorkflowState?.doctor_next_steps || ''} onChange={(e) => handleUpdateSummary('doctor_next_steps', e.target.value)} placeholder="Recommended next steps for the patient..." className="w-full p-3 bg-white border border-indigo-100 rounded-xl text-xs min-h-[90px] outline-none" />
                                 </div>
                                 <button onClick={handleSaveInitialAssessment} className="w-full p-3 bg-indigo-600 text-white rounded-xl font-black text-[10px] uppercase tracking-widest hover:bg-indigo-700 transition-all">Save Initial Assessment</button>
                              </div>
@@ -3758,7 +3854,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                              <div className="grid grid-cols-2 gap-4">
                                 <div>
                                    <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest pl-1">Illness History</label>
-                                   <textarea 
+                                   <DraftTextarea 
                                       className="w-full mt-2 p-4 bg-white border border-slate-100 rounded-2xl text-xs font-medium h-20 outline-none"
                                       placeholder="Patient's medical history..."
                                       value={localWorkflowState?.illness_history || ''}
@@ -3767,7 +3863,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                                 </div>
                                 <div>
                                    <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest pl-1">Clinical Summary</label>
-                                   <textarea 
+                                   <DraftTextarea 
                                       className="w-full mt-2 p-4 bg-white border border-slate-100 rounded-2xl text-xs font-medium h-20 outline-none"
                                       placeholder="Summary of requirements..."
                                       value={localWorkflowState?.clinical_summary || ''}
@@ -3778,7 +3874,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                               
                               <div>
                                  <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest pl-1">Suggested Procedures</label>
-                                 <textarea 
+                                 <DraftTextarea 
                                     className="w-full mt-2 p-4 bg-white border border-slate-100 rounded-2xl text-xs font-medium h-24 outline-none focus:ring-2 focus:ring-teal-500/10 transition-all"
                                     placeholder="List the necessary procedures suggested by the in-house doctor..."
                                     value={localWorkflowState?.suggested_procedures || ''}
@@ -3895,8 +3991,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                                {localWorkflowState?.patient_interest === 'Agreed' && (
                                <button 
                                  onClick={() => {
-                                   if(validateStage(6)) setShowConsultationModal(true);
-                                   else toast.error('Please complete all Stage 6 checklist items first.');
+                                   void handleProceedToSpecialistStage();
                                  }} 
                                  className={`w-full p-5 rounded-[1.5rem] font-black text-[10px] uppercase tracking-widest flex items-center justify-center gap-3 shadow-xl transition-all ${
                                    validateStage(6)
@@ -3904,7 +3999,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                                    : 'bg-slate-200 text-slate-400 cursor-not-allowed opacity-60'
                                  }`}
                                >
-                                  <Clock size={18} /> {validateStage(6) ? 'Book Specialist Doctor Consultation' : '🔒 Complete Proposal Checklist'}
+                                  <Clock size={18} /> {validateStage(6) ? 'Proceed to Specialist Consultation (Stage 7)' : '🔒 Complete Proposal Checklist'}
                                </button>
                                )}
 
@@ -3923,14 +4018,14 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                                 <p className="text-xs text-slate-600">Complete the specialist discussion, record the MOM, confirm the quotation and clinical process with the patient, request the patient to proceed, and provide the payment link.</p>
                              </div>
                              <div className="p-5 bg-white border border-slate-100 rounded-3xl space-y-3">
-                                <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Step 1 — Specialist Doctor Call</p>
+                                <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Step 1 — Specialist Doctor Call & MOM</p>
                                 {localWorkflowState?.doctor_call_notes && (
                                   <div className="p-4 bg-slate-50 border border-slate-100 rounded-xl">
                                     <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-2">Saved Doctor Call Notes (Stage 4)</p>
                                     <p className="text-xs text-slate-700 whitespace-pre-wrap">{localWorkflowState.doctor_call_notes}</p>
                                   </div>
                                 )}
-                                <textarea value={localWorkflowState?.specialist_call_notes || ''} onChange={(e) => handleUpdateSummary('specialist_call_notes', e.target.value)} placeholder="Medical condition, proposed treatment, procedure, clinical process, questions, and concerns..." className="w-full p-3 bg-slate-50 border border-slate-100 rounded-xl text-xs min-h-[110px] outline-none" />
+                                <DraftTextarea value={localWorkflowState?.specialist_call_notes || ''} onChange={(e) => handleUpdateSummary('specialist_call_notes', e.target.value)} placeholder="Medical condition, proposed treatment, procedure, clinical process, questions, and concerns..." className="w-full p-3 bg-slate-50 border border-slate-100 rounded-xl text-xs min-h-[110px] outline-none" />
                                 <button onClick={() => handleCompleteSpecialistCall(localWorkflowState?.specialist_call_notes || '')} className="w-full p-3 bg-indigo-600 text-white rounded-xl font-black text-[10px] uppercase tracking-widest">{localWorkflowState?.specialist_call_completed_at ? '✓ Specialist Doctor Call Recorded' : 'Record Specialist Doctor Call'}</button>
                                 {localWorkflowState?.specialist_call_completed_at && localWorkflowState?.specialist_call_notes && (
                                   <div className="p-4 bg-indigo-50/60 border border-indigo-100 rounded-xl">
@@ -3940,12 +4035,27 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                                 )}
                              </div>
                              <div className="p-5 bg-white border border-slate-100 rounded-3xl space-y-3">
-                                <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Step 2 — Record MOM</p>
+                                <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Step 1b — Record MOM</p>
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                                   {MOM_FIELDS.map(([field, label]) => (
                                     <div key={field} className="space-y-1">
                                       <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest pl-1">{label}</label>
-                                      <textarea value={localWorkflowState?.[field] || ''} onChange={(e) => handleUpdateSummary(field, e.target.value)} placeholder={label} className="w-full p-3 bg-slate-50 border border-slate-100 rounded-xl text-xs min-h-[58px] outline-none" />
+                                      {field === 'mom_date_time' ? (
+                                        <>
+                                          <input
+                                            type="datetime-local"
+                                            value={MOM_DATE_PATTERN.test(String(localWorkflowState?.[field] || '')) ? localWorkflowState[field] : ''}
+                                            onChange={(e) => handleUpdateSummary(field, e.target.value)}
+                                            onClick={(e) => { try { (e.currentTarget as any).showPicker?.(); } catch { /* picker opens on the icon instead */ } }}
+                                            className="w-full p-3 bg-slate-50 border border-slate-100 rounded-xl text-xs outline-none cursor-pointer"
+                                          />
+                                          {localWorkflowState?.[field] && !MOM_DATE_PATTERN.test(String(localWorkflowState[field])) && (
+                                            <p className="text-[9px] font-bold text-amber-600 pl-1">Saved earlier as “{String(localWorkflowState[field])}”. Pick the date and time to replace it.</p>
+                                          )}
+                                        </>
+                                      ) : (
+                                        <DraftTextarea value={localWorkflowState?.[field] || ''} onChange={(e) => handleUpdateSummary(field, e.target.value)} placeholder={label} className="w-full p-3 bg-slate-50 border border-slate-100 rounded-xl text-xs min-h-[58px] outline-none" />
+                                      )}
                                     </div>
                                   ))}
                                 </div>
@@ -3955,8 +4065,8 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                                 )}
                              </div>
                              <div className="p-5 bg-white border border-slate-100 rounded-3xl space-y-3">
-                                <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Step 3 — BDM Calls Patient</p>
-                                <textarea value={localWorkflowState?.bdm_call_notes || ''} onChange={(e) => handleUpdateSummary('bdm_call_notes', e.target.value)} placeholder="Record patient understanding, willingness to proceed, concerns, and follow-up..." className="w-full p-3 bg-slate-50 border border-slate-100 rounded-xl text-xs min-h-[90px] outline-none" />
+                                <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Step 2 — BDM Calls Patient</p>
+                                <DraftTextarea value={localWorkflowState?.bdm_call_notes || ''} onChange={(e) => handleUpdateSummary('bdm_call_notes', e.target.value)} placeholder="Record patient understanding, willingness to proceed, concerns, and follow-up..." className="w-full p-3 bg-slate-50 border border-slate-100 rounded-xl text-xs min-h-[90px] outline-none" />
                                 <button onClick={() => handleCompleteBdmCall(localWorkflowState?.bdm_call_notes || '')} className="w-full p-3 bg-slate-900 text-white rounded-xl font-black text-[10px] uppercase tracking-widest">{localWorkflowState?.bdm_call_completed_at ? '✓ BDM Call Recorded' : 'Record BDM Patient Call'}</button>
                              </div>
                              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -3964,13 +4074,13 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                                 <button onClick={() => handleConfirmClinicalProcessAgreement(true)} className={`p-4 rounded-2xl font-black text-[10px] uppercase tracking-widest ${localWorkflowState?.clinical_process_agreement_confirmed ? 'bg-emerald-600 text-white' : 'bg-emerald-50 text-emerald-700 border border-emerald-100'}`}>{localWorkflowState?.clinical_process_agreement_confirmed ? '✓ Clinical Process Confirmed' : 'Confirm Clinical Process Agreement'}</button>
                              </div>
                              <div className="p-5 bg-white border border-slate-100 rounded-3xl space-y-3">
-                                <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Step 4 — Patient Agreement</p>
+                                <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Step 3 — Patient Agreement</p>
                                 <div className="flex gap-3"><button onClick={() => handleRecordStage7Decision('Agreed')} className={`flex-1 p-3 rounded-xl font-black text-[10px] uppercase tracking-widest ${localWorkflowState?.stage7_patient_decision === 'Agreed' ? 'bg-emerald-600 text-white' : 'bg-emerald-50 text-emerald-700'}`}>Patient Agreed</button><button onClick={() => handleRecordStage7Decision('Disagreed')} className={`flex-1 p-3 rounded-xl font-black text-[10px] uppercase tracking-widest ${localWorkflowState?.stage7_patient_decision === 'Disagreed' ? 'bg-rose-600 text-white' : 'bg-rose-50 text-rose-700'}`}>Patient Disagreed</button></div>
-                                {localWorkflowState?.stage7_patient_decision === 'Disagreed' && <div className="grid grid-cols-1 md:grid-cols-3 gap-3"><textarea value={localWorkflowState?.stage7_disagreement_reason || ''} onChange={(e) => handleUpdateSummary('stage7_disagreement_reason', e.target.value)} placeholder="Reason" className="p-3 bg-rose-50 border border-rose-100 rounded-xl text-xs min-h-[70px]" /><textarea value={localWorkflowState?.stage7_disagreement_concern || ''} onChange={(e) => handleUpdateSummary('stage7_disagreement_concern', e.target.value)} placeholder="Patient concern" className="p-3 bg-rose-50 border border-rose-100 rounded-xl text-xs min-h-[70px]" /><textarea value={localWorkflowState?.stage7_disagreement_followup || ''} onChange={(e) => handleUpdateSummary('stage7_disagreement_followup', e.target.value)} placeholder="Required follow-up" className="p-3 bg-rose-50 border border-rose-100 rounded-xl text-xs min-h-[70px]" /></div>}
+                                {localWorkflowState?.stage7_patient_decision === 'Disagreed' && <div className="grid grid-cols-1 md:grid-cols-3 gap-3"><DraftTextarea value={localWorkflowState?.stage7_disagreement_reason || ''} onChange={(e) => handleUpdateSummary('stage7_disagreement_reason', e.target.value)} placeholder="Reason" className="p-3 bg-rose-50 border border-rose-100 rounded-xl text-xs min-h-[70px]" /><DraftTextarea value={localWorkflowState?.stage7_disagreement_concern || ''} onChange={(e) => handleUpdateSummary('stage7_disagreement_concern', e.target.value)} placeholder="Patient concern" className="p-3 bg-rose-50 border border-rose-100 rounded-xl text-xs min-h-[70px]" /><DraftTextarea value={localWorkflowState?.stage7_disagreement_followup || ''} onChange={(e) => handleUpdateSummary('stage7_disagreement_followup', e.target.value)} placeholder="Required follow-up" className="p-3 bg-rose-50 border border-rose-100 rounded-xl text-xs min-h-[70px]" /></div>}
                              </div>
                              <button onClick={handleRequestPatientToProceed} className={`w-full p-4 rounded-2xl font-black text-[10px] uppercase tracking-widest ${localWorkflowState?.request_to_proceed_confirmed ? 'bg-teal-600 text-white' : 'bg-teal-50 text-teal-700 border border-teal-100'}`}>{localWorkflowState?.request_to_proceed_confirmed ? '✓ Patient Requested to Proceed' : 'Request Patient to Proceed'}</button>
                              <div className="p-5 bg-indigo-50/70 border border-indigo-100 rounded-3xl space-y-3">
-                                <p className="text-[9px] font-black text-indigo-700 uppercase tracking-widest">Step 4b — VIL Medical Visa Form</p>
+                                <p className="text-[9px] font-black text-indigo-700 uppercase tracking-widest">Step 4 — VIL Medical Visa Application Form</p>
                                 <p className="text-xs text-slate-600">The patient receives the VIL form by email. Their answers and documents are saved here automatically when they submit.</p>
                                 <div className="flex items-center justify-between gap-3 flex-wrap">
                                   <p className="text-[10px] font-bold text-slate-500">{localWorkflowState?.vil_form_sent_at ? `Sent ${new Date(localWorkflowState.vil_form_sent_at).toLocaleString()}` : 'Not sent yet'}</p>
@@ -3994,11 +4104,17 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                                       </div>
                                       <div className="space-y-1">
                                         {VIL_FILE_ITEMS.map((item) => {
-                                          const doc = (vilSubmission.documents || []).find((d: any) => d.field === item.key);
+                                          const docs = (vilSubmission.documents || []).filter((d: any) => d.field === item.key);
                                           return (
-                                            <div key={item.key} className="flex items-center justify-between gap-3 p-2 bg-white rounded-lg">
+                                            <div key={item.key} className="flex items-start justify-between gap-3 p-2 bg-white rounded-lg">
                                               <p className="text-xs text-slate-700">{item.label}</p>
-                                              {doc ? <button type="button" onClick={() => openVilDocument(doc)} className="text-[10px] font-bold text-indigo-600 underline truncate max-w-[200px]">{doc.file_name}</button> : <span className="text-[10px] text-rose-600 font-bold">Missing</span>}
+                                              {docs.length > 0 ? (
+                                                <div className="flex flex-col items-end gap-1">
+                                                  {docs.map((doc: any, index: number) => (
+                                                    <button key={`${doc.file_path || doc.file_name}-${index}`} type="button" onClick={() => openVilDocument(doc)} className="text-[10px] font-bold text-indigo-600 underline truncate max-w-[200px]">{doc.file_name}</button>
+                                                  ))}
+                                                </div>
+                                              ) : <span className="text-[10px] text-rose-600 font-bold">Missing</span>}
                                             </div>
                                           );
                                         })}
@@ -4008,7 +4124,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                                 </div>
                              </div>
                              <div className="p-5 bg-sky-50/70 border border-sky-100 rounded-3xl space-y-4">
-                                <p className="text-[9px] font-black text-sky-700 uppercase tracking-widest">Step 4c — Visa Application</p>
+                                <p className="text-[9px] font-black text-sky-700 uppercase tracking-widest">Step 5 — Visa Application</p>
                                 <label className="flex items-center gap-3 p-3 bg-white rounded-xl border border-sky-100 cursor-pointer">
                                   <input type="checkbox" className="w-4 h-4 accent-sky-600" checked={Boolean(localWorkflowState?.visa_application_sent_at)} disabled={isStageReadOnly} onChange={(e) => handleToggleVisaSent(e.target.checked)} />
                                   <span className="text-xs font-black text-slate-700">Send request for visa application</span>
@@ -4046,7 +4162,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                                 <p className="text-[10px] font-black text-emerald-700 uppercase tracking-widest">Stage 8: Medical Case Handover</p>
                                 <p className="text-xs text-slate-600">The advance payment (payment link and verification) is completed here in Stage 8 before the lead is converted. Visa application steps are handled in Stage 7. Stage 8 then creates or links the patient website account, converts the patient into a medical case, and hands the connected record to CDM/WaruBuddy.</p>
                              </div>
-                             <div className="p-5 bg-amber-50 border border-amber-100 rounded-3xl space-y-3"><p className="text-[9px] font-black text-amber-700 uppercase tracking-widest">Advance Payment — Payment Link & Verification</p><button onClick={handleGenerateAdvancePaymentLink} className="w-full p-3 bg-indigo-600 text-white rounded-xl font-black text-[10px] uppercase tracking-widest">{localWorkflowState?.payment_reference ? '✓ Payment Link Generated' : 'Generate Payment Link'}</button><input value={localWorkflowState?.payment_link || ''} onChange={(e) => handleUpdateSummary('payment_link', e.target.value)} placeholder="https://payment.example.com/..." className="w-full p-3 bg-white border border-amber-100 rounded-xl text-xs font-bold" /><button onClick={() => handleProvidePaymentLink(localWorkflowState?.payment_link || '')} className="w-full p-3 bg-amber-600 text-white rounded-xl font-black text-[10px] uppercase tracking-widest">{localWorkflowState?.payment_link_provided_at ? '✓ Payment Link Provided' : 'Provide Payment Link'}</button><div className="grid grid-cols-2 gap-3"><input type="text" value={localWorkflowState?.payment_status || ''} onChange={(e) => handleUpdateSummary('payment_status', e.target.value)} placeholder="Payment status" className="p-3 bg-white border border-amber-100 rounded-xl text-xs" /><input type="number" value={localWorkflowState?.payment_amount ?? ''} onChange={(e) => handleUpdateSummary('payment_amount', e.target.value ? Number(e.target.value) : null)} placeholder="Amount" className="p-3 bg-white border border-amber-100 rounded-xl text-xs" /></div><button onClick={handleVerifyAdvancePayment} className={`w-full p-3 rounded-xl font-black text-[10px] uppercase tracking-widest ${localWorkflowState?.advance_payment_verified ? 'bg-teal-600 text-white' : 'bg-white text-teal-700 border border-teal-100'}`}>{localWorkflowState?.advance_payment_verified ? '✓ Advance Payment Verified' : 'Verify Advance Payment'}</button></div>
+                             <div className="p-5 bg-amber-50 border border-amber-100 rounded-3xl space-y-3"><p className="text-[9px] font-black text-amber-700 uppercase tracking-widest">Advance Payment — Payment Link & Verification</p><button onClick={handleGenerateAdvancePaymentLink} className="w-full p-3 bg-indigo-600 text-white rounded-xl font-black text-[10px] uppercase tracking-widest">{localWorkflowState?.payment_reference ? '✓ Payment Link Generated' : 'Generate Payment Link'}</button><DraftInput value={localWorkflowState?.payment_link || ''} onChange={(e) => handleUpdateSummary('payment_link', e.target.value)} placeholder="https://payment.example.com/..." className="w-full p-3 bg-white border border-amber-100 rounded-xl text-xs font-bold" /><button onClick={() => handleProvidePaymentLink(localWorkflowState?.payment_link || '')} className="w-full p-3 bg-amber-600 text-white rounded-xl font-black text-[10px] uppercase tracking-widest">{localWorkflowState?.payment_link_provided_at ? '✓ Payment Link Provided' : 'Provide Payment Link'}</button><div className="grid grid-cols-2 gap-3"><DraftInput type="text" value={localWorkflowState?.payment_status || ''} onChange={(e) => handleUpdateSummary('payment_status', e.target.value)} placeholder="Payment status" className="p-3 bg-white border border-amber-100 rounded-xl text-xs" /><DraftInput type="number" value={localWorkflowState?.payment_amount ?? ''} onChange={(e) => handleUpdateSummary('payment_amount', e.target.value ? Number(e.target.value) : null)} placeholder="Amount" className="p-3 bg-white border border-amber-100 rounded-xl text-xs" /></div><button onClick={handleVerifyAdvancePayment} className={`w-full p-3 rounded-xl font-black text-[10px] uppercase tracking-widest ${localWorkflowState?.advance_payment_verified ? 'bg-teal-600 text-white' : 'bg-white text-teal-700 border border-teal-100'}`}>{localWorkflowState?.advance_payment_verified ? '✓ Advance Payment Verified' : 'Verify Advance Payment'}</button></div>
                                 <div className="p-5 bg-emerald-50/70 border border-emerald-100 rounded-3xl space-y-3">
                                   <div><p className="text-[9px] font-black text-emerald-700 uppercase tracking-widest">Patient Account & Profile</p><p className="mt-1 text-xs text-slate-600">Created when you press "Create Patient Account" below. The CRM securely creates or links the Auth user and the existing WaruWenJo signup trigger creates the standard patient profile, patient record, and role.</p></div>
                                   {localWorkflowState?.patient_user_id ? (
@@ -4275,44 +4391,24 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
         </div>
       )}
 
-      {showConsultationModal && selectedLead && (
-        <div className="fixed inset-0 z-[220] flex items-center justify-center p-4 bg-slate-900/80 backdrop-blur-xl animate-in fade-in duration-300">
-          <div className="bg-white w-full max-w-md rounded-[3rem] shadow-2xl overflow-hidden animate-in zoom-in duration-300">
-            <div className="px-8 py-6 border-b border-slate-100 bg-indigo-600 text-white">
-              <h3 className="text-xl font-black tracking-tight">Clinical Appraisal</h3>
-              <p className="text-[10px] font-bold text-indigo-100 uppercase tracking-widest mt-1">Lead: {selectedLead.name}</p>
+      {showStage5Complete && (
+        <div className="fixed inset-0 z-[230] flex items-center justify-center p-4 bg-slate-900/80 backdrop-blur-xl animate-in fade-in duration-300">
+          <div className="w-full max-w-md bg-white rounded-[2rem] p-8 text-center shadow-2xl space-y-5">
+            <div className="mx-auto w-14 h-14 rounded-full bg-teal-50 text-teal-600 flex items-center justify-center">
+              <CheckCircle2 size={30} />
             </div>
-            <div className="p-8 space-y-6">
-              <div>
-                <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest pl-1">Select Appraisal Specialist</label>
-                <select 
-                  required 
-                  className="w-full mt-2 px-5 py-3.5 bg-slate-50 border border-slate-100 rounded-2xl text-sm outline-none focus:ring-4 focus:ring-indigo-500/10 font-bold appearance-none cursor-pointer"
-                  value={selectedDoctorId}
-                  onChange={e => setSelectedDoctorId(e.target.value)}
-                >
-                  <option value="">Choose Specialist...</option>
-                  {doctors.map(doc => (
-                    <option key={doc.id} value={doc.id}>{doc.name} - {doc.specialty}</option>
-                  ))}
-                </select>
-              </div>
-              <div className="flex flex-col gap-3">
-                <button 
-                  onClick={handleScheduleConsultation}
-                  disabled={!selectedDoctorId}
-                  className="w-full py-4 bg-indigo-600 text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl shadow-indigo-500/20 hover:bg-indigo-700 transition-all disabled:opacity-50"
-                >
-                  Schedule Assessment
-                </button>
-                <button 
-                  onClick={() => setShowConsultationModal(false)}
-                  classAName="w-full py-4 bg-slate-50 text-slate-400 rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-slate-100 transition-all"
-                >
-                  Cancel
-                </button>
-              </div>
+            <div className="space-y-2">
+              <h3 className="text-xl font-black text-slate-900">Stage 5 Completed</h3>
+              <p className="text-sm font-semibold text-slate-500">
+                Clinical review is finalized. The lead has moved to Stage 6 (Financial & Logistics Proposal) and the assigned BDM can now work on it.
+              </p>
             </div>
+            <button
+              onClick={() => setShowStage5Complete(false)}
+              className="w-full py-4 bg-teal-600 text-white rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-teal-700 transition-all"
+            >
+              OK
+            </button>
           </div>
         </div>
       )}

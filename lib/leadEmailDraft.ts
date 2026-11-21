@@ -48,7 +48,6 @@ export const LEAD_EMAIL_TEMPLATES: Record<LeadEmailKind, LeadEmailTemplate> = {
       '<p><strong>Documents you will need</strong></p>' +
       '<ul>' +
       '<li>Recent colour photograph (2 in × 2 in, JPEG, 10 KB – 1 MB)</li>' +
-      '<li>Medical invitation letter from the Indian hospital</li>' +
       '<li>Proof of residence</li>' +
       '<li>Proof of occupation</li>' +
       '<li>Polio and Yellow Fever vaccination certificate</li>' +
