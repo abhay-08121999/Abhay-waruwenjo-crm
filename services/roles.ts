@@ -1120,43 +1120,21 @@ export const fetchInHouseDoctorUsers = async (): Promise<{
   data: InHouseDoctorUser[];
   error: Error | null;
 }> => {
-  const db = supabase as any;
-  // Same tables the rest of the CRM uses for role assignments (user_roles + crm_user_profiles).
-  const { data: roleRows, error: roleError } = await db
-    .from('user_roles')
-    .select('user_id')
-    .eq('role', 'in_house_doctor');
-
-  if (roleError) {
-    console.error('In-house doctor role lookup failed:', roleError);
-    return { data: [], error: roleError as unknown as Error };
+  // Secure database function: any signed-in CRM user can see the list of in-house doctors,
+  // without needing read access to other users' roles or profiles.
+  const { data, error } = await (supabase as any).rpc('list_in_house_doctors');
+  if (error) {
+    console.error('In-house doctor list failed:', error);
+    return { data: [], error: error as Error };
   }
-
-  const userIds: string[] = Array.from(
-    new Set((roleRows || []).map((row: any) => String(row.user_id)).filter(Boolean)),
-  );
-  if (!userIds.length) return { data: [], error: null };
-
-  const { data: profiles, error: profileError } = await db
-    .from('crm_user_profiles')
-    .select('user_id, email, full_name, is_active')
-    .in('user_id', userIds);
-
-  if (profileError) {
-    console.error('In-house doctor profile lookup failed:', profileError);
-    return { data: [], error: profileError as unknown as Error };
-  }
-
-  const doctors = (profiles || [])
-    .filter((profile: any) => profile.is_active !== false)
-    .map((profile: any): InHouseDoctorUser => ({
-      userId: String(profile.user_id),
-      // Show a person's name, never an ID. Fall back to email if the name is empty.
-      name: String(profile.full_name || profile.email || 'In-house doctor'),
-      email: String(profile.email || ''),
+  const doctors = ((data || []) as any[])
+    .filter((p) => p.is_active !== false)
+    .map((p): InHouseDoctorUser => ({
+      userId: String(p.user_id),
+      name: String(p.full_name || p.email || 'In-house doctor'),
+      email: String(p.email || ''),
     }))
-    .sort((a: InHouseDoctorUser, b: InHouseDoctorUser) => a.name.localeCompare(b.name));
-
+    .sort((a, b) => a.name.localeCompare(b.name));
   return { data: doctors, error: null };
 };
 

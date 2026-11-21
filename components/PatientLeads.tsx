@@ -208,6 +208,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   const [isSendingVilForm, setIsSendingVilForm] = useState(false);
   const [isUploadingVisa, setIsUploadingVisa] = useState(false);
   const [bdmUsers, setBdmUsers] = useState<any[]>([]);
+  const [userDirectory, setUserDirectory] = useState<Record<string, string>>({});
   const roleKeys: string[] = (roles as any[]).map((r) => (typeof r === 'string' ? r : r?.key));
   const canAssignBdm = roleKeys.includes('admin') || roleKeys.includes('super_admin');
   const [vilSubmission, setVilSubmission] = useState<any>(null);
@@ -226,7 +227,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
     { id: 5, name: 'Clinical Qualification & Planning', label: 'Clinical', tasks: ['Suggest Hospitals & Surgeons/Specialists', 'Finalize Clinical Recommendation & Confirm Clinical Review', 'Generate Clinical Report'], statusMapping: LeadStatus.QUALIFIED },
     { id: 6, name: 'Financial & Logistics Proposal', label: 'BDM Pipeline', tasks: ['Generate Financial Proposal', 'Discuss Travel & Accommodation', 'Address Patient Concerns', 'Generate Proposal PDF', 'Send Proposal Via Mail', 'Confirm Patient Interest Via Call'], statusMapping: LeadStatus.QUALIFIED },
     { id: 7, name: 'Specialist Consultation, Payment & Confirmation', label: 'Specialist Consult & Payment', tasks: ['Specialist Doctor Call', 'Record MOM', 'BDM Calls Patient', 'Confirm Quotation Agreement', 'Confirm Clinical Process Agreement', 'Record Patient Decision', 'Request Patient to Proceed'], statusMapping: LeadStatus.QUALIFIED },
-    { id: 8, name: 'Medical Case Handover', label: 'CDM/WaruBuddy Handover', tasks: ['Generate Payment Link', 'Provide Payment Link', 'Verify Advance Payment', 'Convert Lead to Medical Case', 'Prepare Complete Patient Handover', 'Create Patient Account', 'Handover Patient from BDM to CDM/WaruBuddy', 'CDM/WaruBuddy Accepts Handover', 'Confirm Case Ownership', 'Complete Stage 8'], statusMapping: LeadStatus.WON },
+    { id: 8, name: 'Medical Case Handover', label: 'CDM/WaruBuddy Handover', tasks: ['Collect Advance Payment', 'Create Patient Account & Medical Case', 'Handover to CDM/WaruBuddy', 'Complete Stage 8'], statusMapping: LeadStatus.WON },
     { id: 9, name: 'Lost / Dropped', label: 'Archived', tasks: ['Select Drop-off Reason', 'Archive Lead'], statusMapping: LeadStatus.LOST }
   ];
 
@@ -406,6 +407,17 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
           'Prepare Patient Handover', 'Share Clinical Information', 'Share Financial Information', 'Share Specialist/MOM Information',
         ].includes(task)),
       };
+      // Stage 8 merged checklist: carry over ticks from the old, longer checklist.
+      {
+        const oldStage8: string[] = Array.isArray(hydratedState.stage8_checklist) ? hydratedState.stage8_checklist : [];
+        const has = (...names: string[]) => names.some(name => oldStage8.includes(name));
+        const merged8: string[] = [];
+        if (has('Verify Advance Payment')) merged8.push('Collect Advance Payment');
+        if (has('Convert Lead to Medical Case', 'Create Patient Account')) merged8.push('Create Patient Account & Medical Case');
+        if (has('CDM/WaruBuddy Accepts Handover', 'Confirm Case Ownership')) merged8.push('Handover to CDM/WaruBuddy');
+        if (has('Complete Stage 8')) merged8.push('Complete Stage 8');
+        hydratedState.stage8_checklist = Array.from(new Set([...oldStage8.filter(task => merged8.includes(task)), ...merged8]));
+      }
       const normalizedStageChecklists = Object.fromEntries(
         STAGES.map(stage => [
           `stage${stage.id}_checklist`,
@@ -573,6 +585,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
 
     // Moving a lead out of a stage needs write access to the stage it is currently in.
     if (blockReadOnlyWrite(activeWorkflowStage)) return;
+    setIsViewOnlyStage(false);
 
     // Allow jumping to Stage 9 (Lost / Dropped) from anywhere without validation
     if (stage > activeWorkflowStage && stage !== 9) {
@@ -1214,18 +1227,6 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
     }
   };
 
-  const handleShareHandoverInformation = async (type: 'clinical' | 'financial' | 'specialist') => {
-    if (denyIfLeadLocked()) return;
-    const state = workflowStateRef.current || localWorkflowState;
-    const fields = type === 'clinical'
-      ? { clinical_information_shared: true }
-      : type === 'financial'
-        ? { financial_information_shared: true }
-        : { specialist_mom_information_shared: true };
-    await persistWorkflowPatch(fields);
-    toast.success(`${type[0].toUpperCase() + type.slice(1)} handover information marked shared`);
-  };
-
   const handleInitiateHandover = async () => {
     if (denyIfLeadLocked()) return;
     const state = workflowStateRef.current || localWorkflowState;
@@ -1247,25 +1248,13 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
       toast.error('Send the handover to CDM/WaruBuddy before accepting it.');
       return;
     }
-    await saveStage8Task('CDM/WaruBuddy Accepts Handover', {
-      handover_accepted_at: new Date().toISOString(),
+    const now = new Date().toISOString();
+    await saveStage8Task('Handover to CDM/WaruBuddy', {
+      handover_accepted_at: now,
+      case_ownership_confirmed_at: now,
       handover_status: 'Accepted',
     });
-    toast.success('CDM/WaruBuddy handover accepted');
-  };
-
-  const handleConfirmCaseOwnership = async () => {
-    if (denyIfLeadLocked()) return;
-    const state = workflowStateRef.current || localWorkflowState;
-    if (!state?.handover_accepted_at) {
-      toast.error('CDM/WaruBuddy must accept the handover before ownership is confirmed.');
-      return;
-    }
-    await saveStage8Task('Confirm Case Ownership', {
-      case_ownership_confirmed_at: new Date().toISOString(),
-      handover_status: 'CDM/WaruBuddy Owner',
-    });
-    toast.success('CDM/WaruBuddy ownership confirmed');
+    toast.success('CDM/WaruBuddy accepted the handover and ownership is confirmed');
   };
 
   const handleCompleteStage8 = async () => {
@@ -2031,25 +2020,46 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
     toast.success('Clinical review confirmed');
   };
 
+  // Resolves a user ID to a person's name. Never returns the ID itself.
+  const userNameFor = (id?: string | null) => {
+    if (!id) return '';
+    return bdmUsers.find((u) => u.id === id)?.full_name
+      || inHouseDoctors.find((d) => d.userId === id)?.name
+      || userDirectory[id]
+      || 'Team member';
+  };
+
+  // Lead owner shown on the lead card. Saved doctor name wins for leads in the doctor inbox.
+  useEffect(() => {
+    const known = new Set<string>([
+      ...bdmUsers.map((u) => String(u.id)),
+      ...inHouseDoctors.map((d) => String(d.userId)),
+      ...Object.keys(userDirectory),
+    ]);
+    const missing = Array.from(new Set(
+      leads
+        .flatMap((l) => [l.assignedTo, l.assignedBdmId])
+        .filter((id): id is string => Boolean(id) && !known.has(String(id)))
+    ));
+    if (!missing.length) return;
+    let cancelled = false;
+    (async () => {
+      const { data, error } = await (supabase as any).rpc('get_crm_user_names', { _ids: missing });
+      if (error || cancelled) return;
+      const found: Record<string, string> = Object.fromEntries(
+        (data || []).map((p: any) => [String(p.user_id), String(p.full_name || p.email || 'Team member')])
+      );
+      const fill = Object.fromEntries(missing.map((id) => [id, found[id] || 'Team member']));
+      setUserDirectory((prev) => ({ ...prev, ...fill }));
+    })();
+    return () => { cancelled = true; };
+  }, [leads, bdmUsers, inHouseDoctors]);
+
   const getLeadOwnerName = (lead: Lead) => {
-    const inHouseOwner = inHouseDoctors.find((d) => d.userId === lead.assignedTo);
-    if (inHouseOwner) return inHouseOwner.name;
-    // 1. Prefer the explicitly saved name in workflow state
-    if (lead.workflowState?.assigned_doctor_name) {
-      return lead.workflowState.assigned_doctor_name;
-    }
-    
-    const assignedTo = lead.assignedTo;
-    if (!assignedTo) return 'Karthik Rathod';
-    
-    // 2. Fallback to existing resolution logic
-    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(assignedTo)) {
-      const doctor = doctors.find(d => d.id === assignedTo);
-      if (doctor) return doctor.name;
-      return `Admin (${assignedTo.slice(0, 4)})`; 
-    }
-    
-    return assignedTo;
+    if (lead.workflowState?.assigned_doctor_name) return lead.workflowState.assigned_doctor_name;
+    const ownerId = lead.assignedTo || lead.assignedBdmId;
+    if (!ownerId) return 'Unassigned';
+    return userNameFor(ownerId);
   };
 
   // ── Welcome Email: generates PDF and sends email via Edge Function ──
@@ -3162,7 +3172,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                             BDM: {bdmNameFor(bdmIdFor(lead))}
                           </span>
                         )}
-                        {canAssignBdm ? (
+                        {isInHouseDoctorOnly ? (
                           <select
                             value={inHouseIdFor(lead)}
                             onClick={(e) => e.stopPropagation()}
@@ -3257,7 +3267,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
 
             <div className="px-10 pt-2 flex items-center gap-3 flex-wrap">
               <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Assigned In-House Doctor</p>
-              {canAssignBdm ? (
+              {isInHouseDoctorOnly ? (
                 <select
                   value={inHouseIdFor(selectedLead)}
                   onChange={(e) => handleAssignInHouseDoctor(selectedLead.id, e.target.value || null)}
@@ -3617,6 +3627,38 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                                 <p className="text-xs text-slate-600">This is an informational step, not a checkbox. The assigned doctor can review the complete enquiry before contacting the patient.</p>
                                 <p className="text-xs font-black text-indigo-700">Assigned doctor: {localWorkflowState?.assigned_doctor_name || 'Not assigned'}</p>
                              </div>
+                             {selectedLead && (
+                               <div className="p-5 bg-white border border-slate-100 rounded-3xl space-y-4">
+                                 <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Complete Lead Details</p>
+                                 <dl className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-3">
+                                   {([
+                                     ['Patient name', selectedLead.name],
+                                     ['Email', selectedLead.email],
+                                     ['Phone', selectedLead.phone],
+                                     ['Country', selectedLead.country],
+                                     ['Treatment interest', selectedLead.treatmentInterest],
+                                     ['Urgency', selectedLead.urgency],
+                                     ['Budget range', selectedLead.budgetRange],
+                                     ['Preferred date', selectedLead.preferredDate],
+                                     ['Lead source', selectedLead.source],
+                                     ['Enquiry created', selectedLead.createdAt ? new Date(selectedLead.createdAt).toLocaleString() : ''],
+                                     ['Last contact', selectedLead.lastContact ? new Date(selectedLead.lastContact).toLocaleString() : ''],
+                                     ['Patient message', selectedLead.message],
+                                     ['Lead notes', selectedLead.notes],
+                                     ['BDM owner', userNameFor(selectedLead.assignedBdmId)],
+                                     ['Assigned in-house doctor', localWorkflowState?.assigned_doctor_name],
+                                     ['Sent to doctor inbox', localWorkflowState?.doctor_assigned_at ? new Date(localWorkflowState.doctor_assigned_at).toLocaleString() : ''],
+                                   ] as [string, unknown][])
+                                     .filter(([, value]) => value !== undefined && value !== null && String(value).trim() !== '')
+                                     .map(([label, value]) => (
+                                       <div key={label} className="border-b border-slate-100 pb-2">
+                                         <dt className="text-[9px] font-black text-slate-400 uppercase tracking-widest">{label}</dt>
+                                         <dd className="mt-1 text-xs font-semibold text-slate-800 whitespace-pre-wrap break-words">{String(value)}</dd>
+                                       </div>
+                                     ))}
+                                 </dl>
+                               </div>
+                             )}
                              <div className="p-5 bg-white border border-slate-100 rounded-3xl space-y-3">
                                 <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Doctor Reviews Uploaded Documents</p>
                                 <p className="text-xs text-slate-500">Medical reports, test results, previous treatment history, patient requirements, and uploaded documents that passed upload-time file checks.</p>
@@ -4005,21 +4047,17 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                                 <p className="text-xs text-slate-600">The advance payment (payment link and verification) is completed here in Stage 8 before the lead is converted. Visa application steps are handled in Stage 7. Stage 8 then creates or links the patient website account, converts the patient into a medical case, and hands the connected record to CDM/WaruBuddy.</p>
                              </div>
                              <div className="p-5 bg-amber-50 border border-amber-100 rounded-3xl space-y-3"><p className="text-[9px] font-black text-amber-700 uppercase tracking-widest">Advance Payment — Payment Link & Verification</p><button onClick={handleGenerateAdvancePaymentLink} className="w-full p-3 bg-indigo-600 text-white rounded-xl font-black text-[10px] uppercase tracking-widest">{localWorkflowState?.payment_reference ? '✓ Payment Link Generated' : 'Generate Payment Link'}</button><input value={localWorkflowState?.payment_link || ''} onChange={(e) => handleUpdateSummary('payment_link', e.target.value)} placeholder="https://payment.example.com/..." className="w-full p-3 bg-white border border-amber-100 rounded-xl text-xs font-bold" /><button onClick={() => handleProvidePaymentLink(localWorkflowState?.payment_link || '')} className="w-full p-3 bg-amber-600 text-white rounded-xl font-black text-[10px] uppercase tracking-widest">{localWorkflowState?.payment_link_provided_at ? '✓ Payment Link Provided' : 'Provide Payment Link'}</button><div className="grid grid-cols-2 gap-3"><input type="text" value={localWorkflowState?.payment_status || ''} onChange={(e) => handleUpdateSummary('payment_status', e.target.value)} placeholder="Payment status" className="p-3 bg-white border border-amber-100 rounded-xl text-xs" /><input type="number" value={localWorkflowState?.payment_amount ?? ''} onChange={(e) => handleUpdateSummary('payment_amount', e.target.value ? Number(e.target.value) : null)} placeholder="Amount" className="p-3 bg-white border border-amber-100 rounded-xl text-xs" /></div><button onClick={handleVerifyAdvancePayment} className={`w-full p-3 rounded-xl font-black text-[10px] uppercase tracking-widest ${localWorkflowState?.advance_payment_verified ? 'bg-teal-600 text-white' : 'bg-white text-teal-700 border border-teal-100'}`}>{localWorkflowState?.advance_payment_verified ? '✓ Advance Payment Verified' : 'Verify Advance Payment'}</button></div>
-                             <div className="p-5 bg-indigo-50/70 border border-indigo-100 rounded-3xl space-y-3">
-                                <p className="text-[9px] font-black text-indigo-700 uppercase tracking-widest">BDM → CDM/WaruBuddy Handover</p>
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3"><input value={localWorkflowState?.handover_bdm_name || ''} onChange={(e) => handleUpdateSummary('handover_bdm_name', e.target.value)} placeholder="BDM name" className="p-3 bg-white border border-indigo-100 rounded-xl text-xs" /><input value={localWorkflowState?.handover_cdm_team || 'CDM/WaruBuddy'} onChange={(e) => handleUpdateSummary('handover_cdm_team', e.target.value)} placeholder="CDM/WaruBuddy team" className="p-3 bg-white border border-indigo-100 rounded-xl text-xs" /></div>
-                                <textarea value={localWorkflowState?.handover_case_information || ''} onChange={(e) => handleUpdateSummary('handover_case_information', e.target.value)} placeholder="Patient requirements, medical information, hospital/specialist, financial information, MOM, travel, accommodation, dates, requests, and important communication history..." className="w-full p-3 bg-white border border-indigo-100 rounded-xl text-xs min-h-[110px]" />
-                                <button onClick={handlePreparePatientHandover} className={`w-full p-3 rounded-xl font-black text-[10px] uppercase tracking-widest ${localWorkflowState?.handover_prepared_at ? 'bg-indigo-600 text-white' : 'bg-white text-indigo-700 border border-indigo-100'}`}>{localWorkflowState?.handover_prepared_at ? '✓ Complete Patient Handover Prepared' : 'Prepare Complete Patient Handover'}</button>
                                 <div className="p-5 bg-emerald-50/70 border border-emerald-100 rounded-3xl space-y-3">
-                                  <div><p className="text-[9px] font-black text-emerald-700 uppercase tracking-widest">Patient Account & Profile</p><p className="mt-1 text-xs text-slate-600">Created automatically as soon as "Prepare Complete Patient Handover" is completed above. The CRM securely creates or links the Auth user and the existing WaruWenJo signup trigger creates the standard patient profile, patient record, and role.</p></div>
+                                  <div><p className="text-[9px] font-black text-emerald-700 uppercase tracking-widest">Patient Account & Profile</p><p className="mt-1 text-xs text-slate-600">Created when you press "Create Patient Account" below. The CRM securely creates or links the Auth user and the existing WaruWenJo signup trigger creates the standard patient profile, patient record, and role.</p></div>
                                   {localWorkflowState?.patient_user_id ? (
                                     <p className="text-[10px] font-bold text-emerald-700">✓ Account {String(localWorkflowState.patient_account_status || 'linked').replace(/_/g, ' ')}{localWorkflowState.patient_invitation_sent_at ? ' · Invitation sent' : ''}</p>
                                   ) : localWorkflowState?.handover_prepared_at ? (
                                     <p className="text-[10px] font-bold text-amber-700">Handover prepared — patient account provisioning is being completed.</p>
                                   ) : (
-                                    <p className="text-[10px] font-bold text-slate-400">Waiting on "Prepare Complete Patient Handover" above.</p>
+                                    <p className="text-[10px] font-bold text-slate-400">Patient account not created yet.</p>
                                   )}
-                                  <button onClick={handleRefreshAccountStatus} disabled={!localWorkflowState?.handover_prepared_at || Boolean(localWorkflowState?.patient_user_id) || isRefreshingAccountStatus} className={`w-full p-3 rounded-xl font-black text-[10px] uppercase tracking-widest ${localWorkflowState?.patient_user_id ? 'bg-emerald-600 text-white' : localWorkflowState?.handover_prepared_at ? 'bg-white text-emerald-700 border border-emerald-100' : 'bg-slate-100 text-slate-400 cursor-not-allowed'}`}>{localWorkflowState?.patient_user_id ? '✓ Patient Account Created & Linked' : isRefreshingAccountStatus ? 'Checking…' : 'Refresh Account Status'}</button>
+                                  <button onClick={handlePreparePatientHandover} disabled={Boolean(localWorkflowState?.patient_user_id) || isRefreshingAccountStatus} className="w-full p-3 rounded-xl font-black text-[10px] uppercase tracking-widest bg-indigo-600 text-white disabled:opacity-50">{localWorkflowState?.patient_user_id ? '✓ Patient Account Ready' : 'Create Patient Account'}</button>
+                                <button onClick={handleRefreshAccountStatus} disabled={Boolean(localWorkflowState?.patient_user_id) || isRefreshingAccountStatus} className={`w-full p-3 rounded-xl font-black text-[10px] uppercase tracking-widest ${localWorkflowState?.patient_user_id ? 'bg-emerald-600 text-white' : localWorkflowState?.handover_prepared_at ? 'bg-white text-emerald-700 border border-emerald-100' : 'bg-slate-100 text-slate-400 cursor-not-allowed'}`}>{localWorkflowState?.patient_user_id ? '✓ Patient Account Created & Linked' : isRefreshingAccountStatus ? 'Checking…' : 'Refresh Account Status'}</button>
                                 </div>
                                 <div className="p-5 bg-white border border-slate-100 rounded-3xl space-y-3">
                                   <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Convert Lead to Medical Case</p>
@@ -4042,11 +4080,8 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                                             : 'Convert Lead to Medical Case'}
                                   </button>
                                 </div>
-                                <div className="grid grid-cols-1 md:grid-cols-3 gap-2"><button onClick={() => handleShareHandoverInformation('clinical')} className={`p-3 rounded-xl text-[9px] font-black uppercase ${localWorkflowState?.clinical_information_shared ? 'bg-teal-600 text-white' : 'bg-white text-teal-700'}`}>Share Clinical Information</button><button onClick={() => handleShareHandoverInformation('financial')} className={`p-3 rounded-xl text-[9px] font-black uppercase ${localWorkflowState?.financial_information_shared ? 'bg-teal-600 text-white' : 'bg-white text-teal-700'}`}>Share Financial Information</button><button onClick={() => handleShareHandoverInformation('specialist')} className={`p-3 rounded-xl text-[9px] font-black uppercase ${localWorkflowState?.specialist_mom_information_shared ? 'bg-teal-600 text-white' : 'bg-white text-teal-700'}`}>Share Specialist/MOM</button></div>
-                                <button onClick={handleInitiateHandover} className={`w-full p-3 rounded-xl font-black text-[10px] uppercase tracking-widest ${localWorkflowState?.handover_initiated_at ? 'bg-indigo-600 text-white' : 'bg-white text-indigo-700 border border-indigo-100'}`}>{localWorkflowState?.handover_initiated_at ? '✓ Handover Sent to CDM/WaruBuddy' : 'Handover Patient from BDM to CDM/WaruBuddy'}</button>
-                                <button onClick={handleAcceptHandover} className={`w-full p-3 rounded-xl font-black text-[10px] uppercase tracking-widest ${localWorkflowState?.handover_accepted_at ? 'bg-emerald-600 text-white' : 'bg-white text-emerald-700 border border-emerald-100'}`}>{localWorkflowState?.handover_accepted_at ? '✓ CDM/WaruBuddy Accepted Handover' : 'CDM/WaruBuddy Accepts Handover'}</button>
-                                <button onClick={handleConfirmCaseOwnership} className={`w-full p-3 rounded-xl font-black text-[10px] uppercase tracking-widest ${localWorkflowState?.case_ownership_confirmed_at ? 'bg-emerald-600 text-white' : 'bg-white text-emerald-700 border border-emerald-100'}`}>{localWorkflowState?.case_ownership_confirmed_at ? '✓ Case Ownership Confirmed' : 'Confirm Case Ownership'}</button>
-                             </div>
+                                <button onClick={handleInitiateHandover} className={`w-full p-3 rounded-xl font-black text-[10px] uppercase tracking-widest ${localWorkflowState?.handover_initiated_at ? 'bg-indigo-600 text-white' : 'bg-white text-indigo-700 border border-indigo-100'}`}>{localWorkflowState?.handover_initiated_at ? '✓ Handover Sent to CDM/WaruBuddy' : 'Send Handover to CDM/WaruBuddy'}</button>
+                                <button onClick={handleAcceptHandover} className={`w-full p-3 rounded-xl font-black text-[10px] uppercase tracking-widest ${localWorkflowState?.handover_accepted_at ? 'bg-emerald-600 text-white' : 'bg-white text-emerald-700 border border-emerald-100'}`}>{localWorkflowState?.handover_accepted_at ? '✓ Handover Accepted & Ownership Confirmed' : 'CDM/WaruBuddy Accepts & Confirms Ownership'}</button>
                              <button onClick={handleCompleteStage8} disabled={Boolean(localWorkflowState?.stage8_completed_at)} className={`w-full p-5 rounded-3xl font-black text-xs uppercase tracking-widest flex items-center justify-center gap-3 ${localWorkflowState?.stage8_completed_at ? 'bg-emerald-600 text-white' : validateStagePrerequisites(8, 'Complete Stage 8') ? 'bg-teal-600 text-white' : 'bg-slate-200 text-slate-400 cursor-not-allowed'}`}><CheckCircle2 size={18} /> {localWorkflowState?.stage8_completed_at ? 'Stage 8 Completed' : validateStagePrerequisites(8, 'Complete Stage 8') ? 'Complete Stage 8' : 'Complete All Stage 8 Requirements'}</button>
                              {localWorkflowState?.stage8_completed_at && (
                                <div className="w-full p-5 rounded-3xl bg-emerald-50 border border-emerald-200 text-center">
