@@ -1120,6 +1120,21 @@ export const fetchInHouseDoctorUsers = async (): Promise<{
   data: InHouseDoctorUser[];
   error: Error | null;
 }> => {
+  // BDMs are not allowed to read other users' profile rows, so the list comes from a database function
+  // (crm_list_in_house_doctors) that returns only the active in-house doctors' names.
+  // If that function is not installed yet, fall back to the direct lookup below.
+  const rpcResult: any = await (supabase as any).rpc('crm_list_in_house_doctors');
+  if (!rpcResult.error && Array.isArray(rpcResult.data)) {
+    const listed = rpcResult.data
+      .map((row: any) => ({
+        userId: String(row.user_id),
+        name: String(row.full_name || row.username || row.email || 'In-house doctor'),
+        email: String(row.email || ''),
+      }))
+      .sort((a: InHouseDoctorUser, b: InHouseDoctorUser) => a.name.localeCompare(b.name));
+    return { data: listed, error: null };
+  }
+
   const { data: assignments, error: assignmentError } = await supabase
     .from('crm_user_role_assignments')
     .select('user_id, role:crm_roles!inner(role_key)')

@@ -11,7 +11,7 @@ import {
   Search, Filter, MoreVertical, Mail, Phone, Plus, X, Activity, UserPlus, 
   Calendar, MapPin, Globe, CreditCard, Clock, MessageSquare, CheckCircle2, 
   LayoutGrid, List, AlertTriangle, ChevronRight, User, Hash, FileText,
-  ExternalLink, Info, Stethoscope, ChevronLeft, Pencil
+  ExternalLink, Info, Stethoscope, ChevronLeft, Pencil, RefreshCw
 } from 'lucide-react';
 import { toast, Toaster } from 'sonner';
 import { generateCallSummary } from '../services/geminiService.ts';
@@ -67,6 +67,93 @@ type ViewMode = 'TABLE' | 'BOARD';
 
 // In-house doctors work only on Stage 4 (Doctor Inbox) and Stage 5 (Clinical), on leads assigned to them.
 const IN_HOUSE_DOCTOR_STAGES = [4, 5];
+
+// Text fields keep what is being typed in their own state, so typing never waits for a save or for the whole
+// lead panel to re-render. The text is saved shortly after typing stops, when the field loses focus, or when
+// the "Save" button is pressed.
+type DraftCommit = (value: string) => unknown;
+type DraftStatus = 'idle' | 'dirty' | 'saving' | 'saved' | 'error';
+const useDraftField = (value: string, onCommit: DraftCommit, delay = 600) => {
+  const [draft, setDraft] = useState(value);
+  const [status, setStatus] = useState<DraftStatus>('idle');
+  const focused = useRef(false);
+  const mounted = useRef(true);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const latest = useRef(value);
+  const saved = useRef(value);
+  const commitRef = useRef(onCommit);
+  commitRef.current = onCommit;
+
+  useEffect(() => {
+    saved.current = value;
+    if (!focused.current && value !== latest.current) {
+      latest.current = value;
+      setDraft(value);
+      setStatus('idle');
+    }
+  }, [value]);
+
+  const flush = async () => {
+    if (timer.current) { clearTimeout(timer.current); timer.current = null; }
+    if (latest.current === saved.current) { setStatus(s => (s === 'dirty' ? 'saved' : s)); return; }
+    const sending = latest.current;
+    saved.current = sending;
+    setStatus('saving');
+    const result: any = await commitRef.current(sending);
+    if (!mounted.current) return;
+    if (result === false) { saved.current = ''; setStatus('error'); return; }
+    setStatus(latest.current === sending ? 'saved' : 'dirty');
+  };
+
+  useEffect(() => () => {
+    mounted.current = false;
+    if (timer.current) clearTimeout(timer.current);
+    // Leaving the field (for example switching stage) must not lose text that has not been saved yet.
+    if (latest.current !== saved.current) void commitRef.current(latest.current);
+  }, []);
+
+  const handlers = {
+    value: draft,
+    onChange: (e: React.ChangeEvent<HTMLTextAreaElement | HTMLInputElement>) => {
+      latest.current = e.target.value;
+      setDraft(e.target.value);
+      setStatus('dirty');
+      if (timer.current) clearTimeout(timer.current);
+      timer.current = setTimeout(() => { void flush(); }, delay);
+    },
+    onFocus: () => { focused.current = true; },
+    onBlur: () => { focused.current = false; void flush(); },
+  };
+  return { handlers, status, flush };
+};
+
+const DRAFT_STATUS_TEXT: Record<DraftStatus, string> = {
+  idle: '', dirty: 'Unsaved changes…', saving: 'Saving…', saved: '✓ Saved', error: 'Could not save — try again',
+};
+
+type DraftTextareaProps = Omit<React.TextareaHTMLAttributes<HTMLTextAreaElement>, 'value' | 'onChange'> & {
+  value: string; onCommit: DraftCommit; saveLabel?: string;
+};
+const DraftTextarea: React.FC<DraftTextareaProps> = ({ value, onCommit, saveLabel, ...rest }) => {
+  const { handlers, status, flush } = useDraftField(value, onCommit);
+  return (
+    <>
+      <textarea {...rest} {...handlers} />
+      {saveLabel && (
+        <div className="flex items-center justify-between mt-2">
+          <span className={`text-[10px] font-bold ${status === 'error' ? 'text-rose-600' : status === 'saved' ? 'text-emerald-600' : 'text-slate-400'}`}>{DRAFT_STATUS_TEXT[status]}</span>
+          <button type="button" onClick={() => { void flush(); }} className="px-4 py-2 bg-slate-900 text-white rounded-xl font-black text-[10px] uppercase tracking-widest hover:bg-slate-800">{saveLabel}</button>
+        </div>
+      )}
+    </>
+  );
+};
+
+type DraftInputProps = Omit<React.InputHTMLAttributes<HTMLInputElement>, 'value' | 'onChange'> & { value: string; onCommit: DraftCommit };
+const DraftInput: React.FC<DraftInputProps> = ({ value, onCommit, ...rest }) => {
+  const { handlers } = useDraftField(value, onCommit);
+  return <input {...rest} {...handlers} />;
+};
 
 const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   // In-House Doctor can only work on stages 3, 4 and 5.
@@ -198,6 +285,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   const [aiSummaryDraft, setAiSummaryDraft] = useState('');
   const [isGeneratingCallSummary, setIsGeneratingCallSummary] = useState(false);
   const [isSendingDocumentRequest, setIsSendingDocumentRequest] = useState(false);
+  const [isRefreshingDocuments, setIsRefreshingDocuments] = useState(false);
   const [isSendingVilForm, setIsSendingVilForm] = useState(false);
   const [isUploadingVisa, setIsUploadingVisa] = useState(false);
   const [bdmUsers, setBdmUsers] = useState<any[]>([]);
@@ -437,6 +525,22 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   const loadEnquiryDocuments = async (leadId: string) => {
     const { data } = await fetchEnquiryDocuments(leadId);
     if (data) setEnquiryDocuments(data);
+  };
+
+  // Re-reads the lead's documents so anything the patient uploaded from the emailed link shows up here.
+  const handleRefreshDocuments = async () => {
+    if (!selectedLead) return;
+    setIsRefreshingDocuments(true);
+    const before = enquiryDocuments.length;
+    const { data, error } = await fetchEnquiryDocuments(selectedLead.id);
+    setIsRefreshingDocuments(false);
+    if (error || !data) {
+      toast.error('Could not refresh documents. Please try again.');
+      return;
+    }
+    setEnquiryDocuments(data);
+    const added = data.length - before;
+    toast.success(added > 0 ? `${added} new document${added === 1 ? '' : 's'} received` : 'No new documents yet');
   };
 
   // Staff upload of patient documents (PDF, JPG, JPEG, PNG). Several files at once are supported.
@@ -1686,9 +1790,10 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   };
 
   const handleUpdateSummary = async (field: string, value: any) => {
-    if (denyIfLeadLocked()) return;
-     if (!selectedLead || !localWorkflowState) return;
-     await persistWorkflowPatch({ [field]: value });
+    if (denyIfLeadLocked()) return false;
+     if (!selectedLead || !localWorkflowState) return false;
+     const result: any = await persistWorkflowPatch({ [field]: value });
+     return !result?.error;
   };
 
   // Stage 5: several hospitals and surgeons can be recommended. The first item is the primary
@@ -2406,6 +2511,25 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   };
 
   const finalizeClinicalReview = async (lead: Lead) => {
+    // In-house doctors only work Stages 4-5, so they cannot "jump" to Stage 6 in the UI. Their Stage 5 sign-off
+    // still has to move the lead to Stage 6 in the database, so the BDM picks it up from Stage 6 (not Stage 5).
+    if (isInHouseDoctorOnly) {
+      toast.loading('Completing Stage 5...', { id: 'finalize_toast' });
+      try {
+        await workflowSaveQueueRef.current; // make sure the clinical data is saved before the stage moves
+        const stage6 = STAGES.find(s => s.id === 6);
+        const { error } = await updateLeadWorkflow(lead.id, 6, stage6?.statusMapping);
+        if (error) throw error;
+        toast.success('Stage 5 completed. Your work is done — the BDM will continue from Stage 6.', { id: 'finalize_toast', duration: 6000 });
+        await logAdminActivity('Moved to Stage 6: Stage 5 completed by In-House Doctor', 'Patient Lead', lead.id, { stage: 6, status: stage6?.statusMapping });
+        loadActivityLogs(lead.id);
+        loadLeads();
+      } catch (err: any) {
+        console.error('Stage 5 completion failed:', err);
+        toast.error(`Could not complete Stage 5: ${err?.message || 'unknown error'}`, { id: 'finalize_toast' });
+      }
+      return;
+    }
     toast.loading(`Finalizing clinical review...`, { id: 'finalize_toast' });
     // This just moves to Stage 6 now without sending slots
     setTimeout(() => {
@@ -2825,6 +2949,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
           <div>
             <h4 className="text-lg font-black text-slate-900 leading-none group-hover:text-teal-600 transition-colors uppercase truncate max-w-[180px]">{lead.name}</h4>
             <p className="text-[10px] font-black text-indigo-500 uppercase tracking-widest mt-1.5 flex items-center gap-1"><Globe size={10} /> {lead.country || 'International'}</p>
+            {lead.email && <p className="text-[10px] font-bold text-slate-400 mt-1 flex items-center gap-1 truncate max-w-[200px]"><Mail size={10} className="shrink-0" /> <span className="truncate">{lead.email}</span></p>}
           </div>
         </div>
       </div>
@@ -2833,6 +2958,22 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
         <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest leading-none mb-2">Primary Interest</p>
         <p className="text-[13px] font-bold text-slate-800 leading-snug line-clamp-1">{lead.treatmentInterest || 'Medical Consultation'}</p>
       </div>
+
+      {(() => {
+        const stageNo = Math.min(Math.max(Number(lead.workflowStage) || 1, 1), 9);
+        const stageInfo = STAGES.find(s => s.id === stageNo);
+        return (
+          <div className="mb-4">
+            <div className="flex items-center justify-between mb-1.5 gap-2">
+              <span className="text-[9px] font-black text-slate-500 uppercase tracking-widest truncate">Stage {stageNo} · {stageInfo?.label}</span>
+              <span className="text-[9px] font-black text-slate-400 shrink-0">{stageNo}/9</span>
+            </div>
+            <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
+              <div className={`h-full rounded-full transition-all ${stageNo === 9 ? 'bg-rose-400' : 'bg-teal-500'}`} style={{ width: `${(stageNo / 9) * 100}%` }} />
+            </div>
+          </div>
+        );
+      })()}
 
       {lead.workflowState?.callback_due_at && (
         <div className={`mb-3 text-[9px] font-black uppercase tracking-widest ${new Date(lead.workflowState.callback_due_at) < new Date() ? 'text-rose-600' : 'text-amber-600'}`}>
@@ -2910,22 +3051,22 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
 
       {/* CRM Patient Leads Dashboard */}
       <div className="grid grid-cols-2 xl:grid-cols-4 gap-3 mb-1">
-        <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 border-t-4 border-t-blue-500">
+        <div className="bg-white p-5 rounded-2xl shadow-sm hover:shadow-md transition-shadow border border-slate-200 border-t-4 border-t-blue-500">
             <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Total Leads</p>
             <h3 className="text-3xl font-black mt-2 text-slate-800">{leads.length}</h3>
             <p className="text-[10px] font-bold text-emerald-500 mt-2">↑ 12% vs last month</p>
         </div>
-        <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 border-t-4 border-t-emerald-500">
+        <div className="bg-white p-5 rounded-2xl shadow-sm hover:shadow-md transition-shadow border border-slate-200 border-t-4 border-t-emerald-500">
             <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Conversion Rate</p>
             <h3 className="text-3xl font-black mt-2 text-slate-800">{leads.length ? ((leads.filter(l => l.status === 'won').length / leads.length) * 100).toFixed(1) : 0}%</h3>
             <p className="text-[10px] font-bold text-emerald-500 mt-2">↑ 3.2% vs last month</p>
         </div>
-        <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 border-t-4 border-t-amber-500">
+        <div className="bg-white p-5 rounded-2xl shadow-sm hover:shadow-md transition-shadow border border-slate-200 border-t-4 border-t-amber-500">
             <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Avg Response Time</p>
             <h3 className="text-3xl font-black mt-2 text-slate-800">14m</h3>
             <p className="text-[10px] font-bold text-rose-500 mt-2">↓ 2m slower vs last month</p>
         </div>
-        <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 border-t-4 border-t-rose-500">
+        <div className="bg-white p-5 rounded-2xl shadow-sm hover:shadow-md transition-shadow border border-slate-200 border-t-4 border-t-rose-500">
             <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Lost / Dropped</p>
             <h3 className="text-3xl font-black mt-2 text-slate-800">{leads.filter(l => l.status === 'lost').length || 34}</h3>
             <p className="text-[10px] font-bold text-slate-400 mt-2">Primarily due to Price (45%)</p>
@@ -2943,6 +3084,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
             onChange={(e) => setSearchTerm(e.target.value)}
           />
         </div>
+        <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-2 whitespace-nowrap">{filteredLeads.length} of {visibleLeads.length} leads</span>
         <button className="p-4 bg-slate-50 text-slate-400 rounded-2xl hover:text-teal-600 transition-all border border-slate-100"><Filter size={20} /></button>
       </div>
 
@@ -2963,6 +3105,9 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                 {filteredLeads.filter(l => l.status === col.id).map(lead => (
                   <LeadCard key={lead.id} lead={lead} />
                 ))}
+                {filteredLeads.filter(l => l.status === col.id).length === 0 && (
+                  <div className="py-16 text-center text-[10px] font-black uppercase tracking-widest text-slate-300 border-2 border-dashed border-slate-200 rounded-2xl">No leads here</div>
+                )}
               </div>
             </div>
           ))}
@@ -3002,23 +3147,23 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
           </div>
         </div>
       ) : (
-        <div className="bg-white border border-slate-200 rounded-[3rem] overflow-hidden shadow-sm">
+        <div className="bg-white border border-slate-200 rounded-3xl overflow-hidden shadow-sm">
           <div className="overflow-x-auto">
             <table className="w-full text-left border-collapse">
-              <thead className="bg-slate-50/80 border-b border-slate-200">
+              <thead className="bg-slate-50 border-b border-slate-200">
               <tr>
-                <th className="px-10 py-6 text-[10px] font-black text-slate-400 uppercase tracking-[0.2em]">Inquiry ID & Patient</th>
-                <th className="px-10 py-6 text-[10px] font-black text-slate-400 uppercase tracking-[0.2em]">Medical Interest</th>
-                <th className="px-10 py-6 text-[10px] font-black text-slate-400 uppercase tracking-[0.2em]">Priority & Status</th>
-                <th className="px-10 py-6 text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] text-right">Workflow</th>
+                <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-[0.2em]">Inquiry ID & Patient</th>
+                <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-[0.2em]">Medical Interest</th>
+                <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-[0.2em]">Priority & Status</th>
+                <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] text-right">Workflow</th>
               </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {filteredLeads.map((lead) => (
                   <tr key={lead.id} className="hover:bg-slate-50 transition-all duration-300 group cursor-pointer" onClick={() => openLeadDetail(lead)}>
-                    <td className="px-10 py-8">
+                    <td className="px-6 py-5">
                       <div className="flex items-center gap-4">
-                        <div className="w-14 h-14 rounded-2xl bg-slate-100 flex items-center justify-center text-slate-500 font-black text-xl group-hover:bg-teal-600 group-hover:text-white transition-all">
+                        <div className="w-11 h-11 rounded-xl bg-slate-100 flex items-center justify-center text-slate-500 font-black text-lg group-hover:bg-teal-600 group-hover:text-white transition-all">
                           {lead.name.charAt(0)}
                         </div>
                         <div>
@@ -3028,13 +3173,13 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                         </div>
                       </div>
                     </td>
-                    <td className="px-10 py-8">
+                    <td className="px-6 py-5">
                       <div className="space-y-1">
                         <p className="text-sm font-black text-slate-700">{lead.treatmentInterest || 'Clinical Inquiry'}</p>
                         <p className="text-[10px] font-bold text-slate-400 uppercase flex items-center gap-1.5"><Globe size={12} /> {lead.country || 'Unknown origin'}</p>
                       </div>
                     </td>
-                    <td className="px-10 py-8">
+                    <td className="px-6 py-5">
                       <div className="flex items-center gap-3">
                         <span className={`text-[9px] font-black px-4 py-1.5 rounded-full uppercase tracking-widest border ${getUrgencyStyles(lead.urgency || 'Standard')}`}>
                           {lead.urgency || 'Standard'}
@@ -3069,31 +3214,21 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                             BDM: {bdmNameFor(bdmIdFor(lead))}
                           </span>
                         )}
-                        {canAssignBdm ? (
-                          <select
-                            value={inHouseIdFor(lead)}
-                            onClick={(e) => e.stopPropagation()}
-                            onChange={(e) => handleAssignInHouseDoctor(lead.id, e.target.value || null)}
-                            className="text-[9px] font-black uppercase tracking-widest px-3 py-1.5 rounded-full border border-indigo-200 bg-indigo-50 text-indigo-700"
-                            title="Assigned In-House Doctor"
-                          >
-                            <option value="">Doctor: Unassigned</option>
-                            {inHouseDoctors.map((d) => <option key={d.userId} value={d.userId}>Doctor: {d.name}</option>)}
-                          </select>
-                        ) : (
-                          <span className="text-[9px] font-black px-4 py-1.5 rounded-full uppercase tracking-widest border bg-indigo-50 text-indigo-700 border-indigo-200">
+                        <span className="text-[9px] font-black px-4 py-1.5 rounded-full uppercase tracking-widest border bg-indigo-50 text-indigo-700 border-indigo-200">
                             Doctor: {inHouseNameFor(lead)}
                           </span>
-                        )}
                       </div>
                     </td>
-                    <td className="px-10 py-8 text-right">
+                    <td className="px-6 py-5 text-right">
                       <button className="p-3 bg-white text-slate-400 hover:text-teal-600 rounded-2xl shadow-sm border border-slate-100 transition-all">
                         <ChevronRight size={18} />
                       </button>
                     </td>
                   </tr>
                 ))}
+                {filteredLeads.length === 0 && (
+                  <tr><td colSpan={4} className="px-6 py-16 text-center text-[10px] font-black uppercase tracking-widest text-slate-300">No leads match your search</td></tr>
+                )}
               </tbody>
             </table>
           </div>
@@ -3164,18 +3299,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
 
             <div className="px-10 pt-2 flex items-center gap-3 flex-wrap">
               <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Assigned In-House Doctor</p>
-              {canAssignBdm ? (
-                <select
-                  value={inHouseIdFor(selectedLead)}
-                  onChange={(e) => handleAssignInHouseDoctor(selectedLead.id, e.target.value || null)}
-                  className="text-xs font-bold border border-indigo-200 rounded-xl px-3 py-2 bg-indigo-50 text-indigo-700"
-                >
-                  <option value="">Unassigned</option>
-                  {inHouseDoctors.map((d) => <option key={d.userId} value={d.userId}>{d.name}</option>)}
-                </select>
-              ) : (
-                <span className="text-xs font-black text-slate-700">{inHouseNameFor(selectedLead)}</span>
-              )}
+              <span className="text-xs font-black text-slate-700">{inHouseNameFor(selectedLead)}</span>
             </div>
 
             <div className="p-10 space-y-12">
@@ -3374,11 +3498,11 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
 
                              <div>
                                 <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest pl-1">Detailed Requirements</label>
-                                <textarea 
+                                <DraftTextarea 
                                    className="w-full mt-2 p-4 bg-white border border-slate-100 rounded-2xl text-xs font-medium min-h-[100px] outline-none"
                                    placeholder="Patient specific needs, special requests, and detailed health goals..."
                                    value={localWorkflowState?.discovery_requirements || ''}
-                                   onChange={(e) => handleUpdateSummary('discovery_requirements', e.target.value)}
+                                   onCommit={(v) => handleUpdateSummary('discovery_requirements', v)} saveLabel="Save Notes"
                                 />
                              </div>
                              <button 
@@ -3436,17 +3560,6 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                                 )}
                              </div>
 
-                             <div className="p-5 bg-indigo-50/70 border border-indigo-100 rounded-3xl space-y-3">
-                                <div className="flex items-center justify-between">
-                                  <p className="text-[9px] font-black text-indigo-700 uppercase tracking-widest">AI Call Summary</p>
-                                  <button onClick={handleGenerateCallSummary} disabled={isGeneratingCallSummary} className="px-3 py-2 bg-indigo-600 text-white rounded-xl text-[9px] font-black uppercase tracking-widest disabled:opacity-60">
-                                    {isGeneratingCallSummary ? 'Generating...' : 'Generate Summary'}
-                                  </button>
-                                </div>
-                                <textarea value={aiSummaryDraft} onChange={(e) => setAiSummaryDraft(e.target.value)} placeholder="AI-generated summary will appear here for review and editing..." className="w-full p-3 bg-white border border-indigo-100 rounded-xl text-xs font-medium min-h-[110px] outline-none" />
-                                <button onClick={handleSaveCallSummary} className="text-[9px] font-black uppercase tracking-widest text-indigo-700 hover:text-indigo-900">Save reviewed summary</button>
-                             </div>
-
                              <div className="p-5 bg-white border border-slate-100 rounded-3xl space-y-3">
                                 <div className="flex items-center justify-between">
                                   <div>
@@ -3489,7 +3602,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                                 {localWorkflowState?.document_request_sent_at && <p className="text-[10px] font-bold text-teal-700">Sent {new Date(localWorkflowState.document_request_sent_at).toLocaleString()}</p>}
                              </div>
                              <div className="p-5 bg-white border border-slate-100 rounded-3xl space-y-3">
-                                <div className="flex items-center justify-between"><p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Received Medical Documents</p><span className="px-2 py-1 bg-slate-100 rounded-lg text-[9px] font-black">{enquiryDocuments.length} received</span></div>
+                                <div className="flex items-center justify-between gap-2"><p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Received Medical Documents</p><div className="flex items-center gap-2"><span className="px-2 py-1 bg-slate-100 rounded-lg text-[9px] font-black">{enquiryDocuments.length} received</span><button type="button" onClick={handleRefreshDocuments} disabled={isRefreshingDocuments} className="px-3 py-1.5 bg-teal-50 text-teal-700 rounded-lg text-[9px] font-black uppercase tracking-widest hover:bg-teal-100 disabled:opacity-60 disabled:cursor-wait flex items-center gap-1.5"><RefreshCw size={12} className={isRefreshingDocuments ? 'animate-spin' : ''} /> {isRefreshingDocuments ? 'Refreshing...' : 'Refresh Status'}</button></div></div>
                                 <input ref={documentFileInputRef} type="file" multiple accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" className="hidden" onChange={handleStaffDocumentUpload} />
                                 <button onClick={() => documentFileInputRef.current?.click()} disabled={isUploadingDocuments} className="w-full p-3 border-2 border-dashed border-teal-200 text-teal-700 rounded-xl font-black text-[10px] uppercase tracking-widest hover:bg-teal-50 disabled:opacity-60 disabled:cursor-wait"><Plus size={14} className="inline mr-2" />{isUploadingDocuments ? 'Uploading...' : 'Upload Documents (PDF, JPG, JPEG, PNG)'}</button>
                                 {enquiryDocuments.length === 0 ? <p className="text-xs text-slate-500">No documents received yet. Upload them here, or the patient can use the emailed link.</p> : <div className="space-y-2">{enquiryDocuments.map(doc => <div key={doc.id} className="p-3 bg-slate-50 rounded-xl border border-slate-100"><div className="flex items-center justify-between gap-3"><a href={doc.file_url} target="_blank" rel="noreferrer" className="text-xs font-bold text-teal-700 hover:underline truncate">{doc.file_name}</a><span className="text-[9px] font-black uppercase text-emerald-700">Upload checks passed</span></div><p className="text-[10px] text-slate-400 mt-1">{new Date(doc.created_at).toLocaleString()} · {Math.round((doc.file_size || 0) / 1024)} KB</p></div>)}</div>}
@@ -3541,7 +3654,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                                     <span className="text-[9px] font-bold text-slate-400">Saved {new Date(localWorkflowState.doctor_call_notes_saved_at).toLocaleString()}</span>
                                   )}
                                 </div>
-                                <textarea value={localWorkflowState?.doctor_call_notes || ''} onChange={(e) => handleUpdateSummary('doctor_call_notes', e.target.value)} placeholder="Record medical condition, history, concerns, expectations, and questions..." className="w-full p-3 bg-slate-50 border border-slate-100 rounded-xl text-xs min-h-[120px] outline-none" />
+                                <DraftTextarea value={localWorkflowState?.doctor_call_notes || ''} onCommit={(v) => handleUpdateSummary('doctor_call_notes', v)} placeholder="Record medical condition, history, concerns, expectations, and questions..." className="w-full p-3 bg-slate-50 border border-slate-100 rounded-xl text-xs min-h-[120px] outline-none" />
                                 <button onClick={handleSaveDoctorCallNotes} className="w-full p-3 bg-teal-600 text-white rounded-xl font-black text-[10px] uppercase tracking-widest hover:bg-teal-700 transition-all">Save Doctor Call Notes</button>
                              </div>
                              <div className="p-5 bg-indigo-50/70 border border-indigo-100 rounded-3xl space-y-4">
@@ -3553,11 +3666,11 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                                 </div>
                                 <div className="space-y-2">
                                   <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest pl-1">Assessment</label>
-                                  <textarea value={localWorkflowState?.initial_doctor_assessment || ''} onChange={(e) => handleUpdateSummary('initial_doctor_assessment', e.target.value)} placeholder="Initial assessment of the patient's condition..." className="w-full p-3 bg-white border border-indigo-100 rounded-xl text-xs min-h-[110px] outline-none" />
+                                  <DraftTextarea value={localWorkflowState?.initial_doctor_assessment || ''} onCommit={(v) => handleUpdateSummary('initial_doctor_assessment', v)} placeholder="Initial assessment of the patient's condition..." className="w-full p-3 bg-white border border-indigo-100 rounded-xl text-xs min-h-[110px] outline-none" />
                                 </div>
                                 <div className="space-y-2">
                                   <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest pl-1">Recommended Next Steps</label>
-                                  <textarea value={localWorkflowState?.doctor_next_steps || ''} onChange={(e) => handleUpdateSummary('doctor_next_steps', e.target.value)} placeholder="Recommended next steps for the patient..." className="w-full p-3 bg-white border border-indigo-100 rounded-xl text-xs min-h-[90px] outline-none" />
+                                  <DraftTextarea value={localWorkflowState?.doctor_next_steps || ''} onCommit={(v) => handleUpdateSummary('doctor_next_steps', v)} placeholder="Recommended next steps for the patient..." className="w-full p-3 bg-white border border-indigo-100 rounded-xl text-xs min-h-[90px] outline-none" />
                                 </div>
                                 <button onClick={handleSaveInitialAssessment} className="w-full p-3 bg-indigo-600 text-white rounded-xl font-black text-[10px] uppercase tracking-widest hover:bg-indigo-700 transition-all">Save Initial Assessment</button>
                              </div>
@@ -3624,31 +3737,31 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                              <div className="grid grid-cols-2 gap-4">
                                 <div>
                                    <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest pl-1">Illness History</label>
-                                   <textarea 
+                                   <DraftTextarea 
                                       className="w-full mt-2 p-4 bg-white border border-slate-100 rounded-2xl text-xs font-medium h-20 outline-none"
                                       placeholder="Patient's medical history..."
                                       value={localWorkflowState?.illness_history || ''}
-                                      onChange={(e) => handleUpdateSummary('illness_history', e.target.value)}
+                                      onCommit={(v) => handleUpdateSummary('illness_history', v)} saveLabel="Save Notes"
                                    />
                                 </div>
                                 <div>
                                    <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest pl-1">Clinical Summary</label>
-                                   <textarea 
+                                   <DraftTextarea 
                                       className="w-full mt-2 p-4 bg-white border border-slate-100 rounded-2xl text-xs font-medium h-20 outline-none"
                                       placeholder="Summary of requirements..."
                                       value={localWorkflowState?.clinical_summary || ''}
-                                      onChange={(e) => handleUpdateSummary('clinical_summary', e.target.value)}
+                                      onCommit={(v) => handleUpdateSummary('clinical_summary', v)} saveLabel="Save Notes"
                                    />
                                 </div>
                              </div>
                               
                               <div>
                                  <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest pl-1">Suggested Procedures</label>
-                                 <textarea 
+                                 <DraftTextarea 
                                     className="w-full mt-2 p-4 bg-white border border-slate-100 rounded-2xl text-xs font-medium h-24 outline-none focus:ring-2 focus:ring-teal-500/10 transition-all"
                                     placeholder="List the necessary procedures suggested by the in-house doctor..."
                                     value={localWorkflowState?.suggested_procedures || ''}
-                                    onChange={(e) => handleUpdateSummary('suggested_procedures', e.target.value)}
+                                    onCommit={(v) => handleUpdateSummary('suggested_procedures', v)} saveLabel="Save Notes"
                                  />
                               </div>
                               
@@ -3695,6 +3808,12 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                                   </button>
                                 )}
                               </div>
+                              {isInHouseDoctorOnly && (Number(selectedLead.workflowStage) || 1) > 5 ? (
+                                <div className="w-full p-5 rounded-2xl bg-emerald-50 border border-emerald-200 flex items-center justify-center gap-3 text-emerald-700">
+                                  <CheckCircle2 size={18} />
+                                  <span className="text-[10px] font-black uppercase tracking-widest">Stage 5 completed — your work is done</span>
+                                </div>
+                              ) : (
                               <button 
                                  onClick={() => {
                                     if(validateStage(5)) finalizeClinicalReview(selectedLead);
@@ -3708,6 +3827,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                               >
                                  <CheckCircle2 size={16} /> {validateStage(5) ? 'Finalize Clinical Review' : '🔒 Checklist Incomplete'}
                               </button>
+                              )}
                           </div>
                        )}
 
@@ -3796,7 +3916,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                                     <p className="text-xs text-slate-700 whitespace-pre-wrap">{localWorkflowState.doctor_call_notes}</p>
                                   </div>
                                 )}
-                                <textarea value={localWorkflowState?.specialist_call_notes || ''} onChange={(e) => handleUpdateSummary('specialist_call_notes', e.target.value)} placeholder="Medical condition, proposed treatment, procedure, clinical process, questions, and concerns..." className="w-full p-3 bg-slate-50 border border-slate-100 rounded-xl text-xs min-h-[110px] outline-none" />
+                                <DraftTextarea value={localWorkflowState?.specialist_call_notes || ''} onCommit={(v) => handleUpdateSummary('specialist_call_notes', v)} saveLabel="Save Notes" placeholder="Medical condition, proposed treatment, procedure, clinical process, questions, and concerns..." className="w-full p-3 bg-slate-50 border border-slate-100 rounded-xl text-xs min-h-[110px] outline-none" />
                                 <button onClick={() => handleCompleteSpecialistCall(localWorkflowState?.specialist_call_notes || '')} className="w-full p-3 bg-indigo-600 text-white rounded-xl font-black text-[10px] uppercase tracking-widest">{localWorkflowState?.specialist_call_completed_at ? '✓ Specialist Doctor Call Recorded' : 'Record Specialist Doctor Call'}</button>
                                 {localWorkflowState?.specialist_call_completed_at && localWorkflowState?.specialist_call_notes && (
                                   <div className="p-4 bg-indigo-50/60 border border-indigo-100 rounded-xl">
@@ -3811,7 +3931,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                                   {MOM_FIELDS.map(([field, label]) => (
                                     <div key={field} className="space-y-1">
                                       <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest pl-1">{label}</label>
-                                      <textarea value={localWorkflowState?.[field] || ''} onChange={(e) => handleUpdateSummary(field, e.target.value)} placeholder={label} className="w-full p-3 bg-slate-50 border border-slate-100 rounded-xl text-xs min-h-[58px] outline-none" />
+                                      <DraftTextarea value={localWorkflowState?.[field] || ''} onCommit={(v) => handleUpdateSummary(field, v)} placeholder={label} className="w-full p-3 bg-slate-50 border border-slate-100 rounded-xl text-xs min-h-[58px] outline-none" />
                                     </div>
                                   ))}
                                 </div>
@@ -3822,7 +3942,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                              </div>
                              <div className="p-5 bg-white border border-slate-100 rounded-3xl space-y-3">
                                 <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Step 3 — BDM Calls Patient</p>
-                                <textarea value={localWorkflowState?.bdm_call_notes || ''} onChange={(e) => handleUpdateSummary('bdm_call_notes', e.target.value)} placeholder="Record patient understanding, willingness to proceed, concerns, and follow-up..." className="w-full p-3 bg-slate-50 border border-slate-100 rounded-xl text-xs min-h-[90px] outline-none" />
+                                <DraftTextarea value={localWorkflowState?.bdm_call_notes || ''} onCommit={(v) => handleUpdateSummary('bdm_call_notes', v)} saveLabel="Save Notes" placeholder="Record patient understanding, willingness to proceed, concerns, and follow-up..." className="w-full p-3 bg-slate-50 border border-slate-100 rounded-xl text-xs min-h-[90px] outline-none" />
                                 <button onClick={() => handleCompleteBdmCall(localWorkflowState?.bdm_call_notes || '')} className="w-full p-3 bg-slate-900 text-white rounded-xl font-black text-[10px] uppercase tracking-widest">{localWorkflowState?.bdm_call_completed_at ? '✓ BDM Call Recorded' : 'Record BDM Patient Call'}</button>
                              </div>
                              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -3832,7 +3952,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                              <div className="p-5 bg-white border border-slate-100 rounded-3xl space-y-3">
                                 <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Step 4 — Patient Agreement</p>
                                 <div className="flex gap-3"><button onClick={() => handleRecordStage7Decision('Agreed')} className={`flex-1 p-3 rounded-xl font-black text-[10px] uppercase tracking-widest ${localWorkflowState?.stage7_patient_decision === 'Agreed' ? 'bg-emerald-600 text-white' : 'bg-emerald-50 text-emerald-700'}`}>Patient Agreed</button><button onClick={() => handleRecordStage7Decision('Disagreed')} className={`flex-1 p-3 rounded-xl font-black text-[10px] uppercase tracking-widest ${localWorkflowState?.stage7_patient_decision === 'Disagreed' ? 'bg-rose-600 text-white' : 'bg-rose-50 text-rose-700'}`}>Patient Disagreed</button></div>
-                                {localWorkflowState?.stage7_patient_decision === 'Disagreed' && <div className="grid grid-cols-1 md:grid-cols-3 gap-3"><textarea value={localWorkflowState?.stage7_disagreement_reason || ''} onChange={(e) => handleUpdateSummary('stage7_disagreement_reason', e.target.value)} placeholder="Reason" className="p-3 bg-rose-50 border border-rose-100 rounded-xl text-xs min-h-[70px]" /><textarea value={localWorkflowState?.stage7_disagreement_concern || ''} onChange={(e) => handleUpdateSummary('stage7_disagreement_concern', e.target.value)} placeholder="Patient concern" className="p-3 bg-rose-50 border border-rose-100 rounded-xl text-xs min-h-[70px]" /><textarea value={localWorkflowState?.stage7_disagreement_followup || ''} onChange={(e) => handleUpdateSummary('stage7_disagreement_followup', e.target.value)} placeholder="Required follow-up" className="p-3 bg-rose-50 border border-rose-100 rounded-xl text-xs min-h-[70px]" /></div>}
+                                {localWorkflowState?.stage7_patient_decision === 'Disagreed' && <div className="grid grid-cols-1 md:grid-cols-3 gap-3"><DraftTextarea value={localWorkflowState?.stage7_disagreement_reason || ''} onCommit={(v) => handleUpdateSummary('stage7_disagreement_reason', v)} placeholder="Reason" className="p-3 bg-rose-50 border border-rose-100 rounded-xl text-xs min-h-[70px]" /><DraftTextarea value={localWorkflowState?.stage7_disagreement_concern || ''} onCommit={(v) => handleUpdateSummary('stage7_disagreement_concern', v)} placeholder="Patient concern" className="p-3 bg-rose-50 border border-rose-100 rounded-xl text-xs min-h-[70px]" /><DraftTextarea value={localWorkflowState?.stage7_disagreement_followup || ''} onCommit={(v) => handleUpdateSummary('stage7_disagreement_followup', v)} placeholder="Required follow-up" className="p-3 bg-rose-50 border border-rose-100 rounded-xl text-xs min-h-[70px]" /></div>}
                              </div>
                              <button onClick={handleRequestPatientToProceed} className={`w-full p-4 rounded-2xl font-black text-[10px] uppercase tracking-widest ${localWorkflowState?.request_to_proceed_confirmed ? 'bg-teal-600 text-white' : 'bg-teal-50 text-teal-700 border border-teal-100'}`}>{localWorkflowState?.request_to_proceed_confirmed ? '✓ Patient Requested to Proceed' : 'Request Patient to Proceed'}</button>
                              <div className="p-5 bg-indigo-50/70 border border-indigo-100 rounded-3xl space-y-3">
@@ -3912,11 +4032,11 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                                 <p className="text-[10px] font-black text-emerald-700 uppercase tracking-widest">Stage 8: Medical Case Handover</p>
                                 <p className="text-xs text-slate-600">The advance payment (payment link and verification) is completed here in Stage 8 before the lead is converted. Visa application steps are handled in Stage 7. Stage 8 then creates or links the patient website account, converts the patient into a medical case, and hands the connected record to CDM/WaruBuddy.</p>
                              </div>
-                             <div className="p-5 bg-amber-50 border border-amber-100 rounded-3xl space-y-3"><p className="text-[9px] font-black text-amber-700 uppercase tracking-widest">Advance Payment — Payment Link & Verification</p><button onClick={handleGenerateAdvancePaymentLink} className="w-full p-3 bg-indigo-600 text-white rounded-xl font-black text-[10px] uppercase tracking-widest">{localWorkflowState?.payment_reference ? '✓ Payment Link Generated' : 'Generate Payment Link'}</button><input value={localWorkflowState?.payment_link || ''} onChange={(e) => handleUpdateSummary('payment_link', e.target.value)} placeholder="https://payment.example.com/..." className="w-full p-3 bg-white border border-amber-100 rounded-xl text-xs font-bold" /><button onClick={() => handleProvidePaymentLink(localWorkflowState?.payment_link || '')} className="w-full p-3 bg-amber-600 text-white rounded-xl font-black text-[10px] uppercase tracking-widest">{localWorkflowState?.payment_link_provided_at ? '✓ Payment Link Provided' : 'Provide Payment Link'}</button><div className="grid grid-cols-2 gap-3"><input type="text" value={localWorkflowState?.payment_status || ''} onChange={(e) => handleUpdateSummary('payment_status', e.target.value)} placeholder="Payment status" className="p-3 bg-white border border-amber-100 rounded-xl text-xs" /><input type="number" value={localWorkflowState?.payment_amount ?? ''} onChange={(e) => handleUpdateSummary('payment_amount', e.target.value ? Number(e.target.value) : null)} placeholder="Amount" className="p-3 bg-white border border-amber-100 rounded-xl text-xs" /></div><button onClick={handleVerifyAdvancePayment} className={`w-full p-3 rounded-xl font-black text-[10px] uppercase tracking-widest ${localWorkflowState?.advance_payment_verified ? 'bg-teal-600 text-white' : 'bg-white text-teal-700 border border-teal-100'}`}>{localWorkflowState?.advance_payment_verified ? '✓ Advance Payment Verified' : 'Verify Advance Payment'}</button></div>
+                             <div className="p-5 bg-amber-50 border border-amber-100 rounded-3xl space-y-3"><p className="text-[9px] font-black text-amber-700 uppercase tracking-widest">Advance Payment — Payment Link & Verification</p><button onClick={handleGenerateAdvancePaymentLink} className="w-full p-3 bg-indigo-600 text-white rounded-xl font-black text-[10px] uppercase tracking-widest">{localWorkflowState?.payment_reference ? '✓ Payment Link Generated' : 'Generate Payment Link'}</button><DraftInput value={localWorkflowState?.payment_link || ''} onCommit={(v) => handleUpdateSummary('payment_link', v)} placeholder="https://payment.example.com/..." className="w-full p-3 bg-white border border-amber-100 rounded-xl text-xs font-bold" /><button onClick={() => handleProvidePaymentLink(localWorkflowState?.payment_link || '')} className="w-full p-3 bg-amber-600 text-white rounded-xl font-black text-[10px] uppercase tracking-widest">{localWorkflowState?.payment_link_provided_at ? '✓ Payment Link Provided' : 'Provide Payment Link'}</button><div className="grid grid-cols-2 gap-3"><DraftInput type="text" value={localWorkflowState?.payment_status || ''} onCommit={(v) => handleUpdateSummary('payment_status', v)} placeholder="Payment status" className="p-3 bg-white border border-amber-100 rounded-xl text-xs" /><input type="number" value={localWorkflowState?.payment_amount ?? ''} onChange={(e) => handleUpdateSummary('payment_amount', e.target.value ? Number(e.target.value) : null)} placeholder="Amount" className="p-3 bg-white border border-amber-100 rounded-xl text-xs" /></div><button onClick={handleVerifyAdvancePayment} className={`w-full p-3 rounded-xl font-black text-[10px] uppercase tracking-widest ${localWorkflowState?.advance_payment_verified ? 'bg-teal-600 text-white' : 'bg-white text-teal-700 border border-teal-100'}`}>{localWorkflowState?.advance_payment_verified ? '✓ Advance Payment Verified' : 'Verify Advance Payment'}</button></div>
                              <div className="p-5 bg-indigo-50/70 border border-indigo-100 rounded-3xl space-y-3">
                                 <p className="text-[9px] font-black text-indigo-700 uppercase tracking-widest">BDM → CDM/WaruBuddy Handover</p>
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3"><input value={localWorkflowState?.handover_bdm_name || ''} onChange={(e) => handleUpdateSummary('handover_bdm_name', e.target.value)} placeholder="BDM name" className="p-3 bg-white border border-indigo-100 rounded-xl text-xs" /><input value={localWorkflowState?.handover_cdm_team || 'CDM/WaruBuddy'} onChange={(e) => handleUpdateSummary('handover_cdm_team', e.target.value)} placeholder="CDM/WaruBuddy team" className="p-3 bg-white border border-indigo-100 rounded-xl text-xs" /></div>
-                                <textarea value={localWorkflowState?.handover_case_information || ''} onChange={(e) => handleUpdateSummary('handover_case_information', e.target.value)} placeholder="Patient requirements, medical information, hospital/specialist, financial information, MOM, travel, accommodation, dates, requests, and important communication history..." className="w-full p-3 bg-white border border-indigo-100 rounded-xl text-xs min-h-[110px]" />
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3"><DraftInput value={localWorkflowState?.handover_bdm_name || ''} onCommit={(v) => handleUpdateSummary('handover_bdm_name', v)} placeholder="BDM name" className="p-3 bg-white border border-indigo-100 rounded-xl text-xs" /><DraftInput value={localWorkflowState?.handover_cdm_team || 'CDM/WaruBuddy'} onCommit={(v) => handleUpdateSummary('handover_cdm_team', v)} placeholder="CDM/WaruBuddy team" className="p-3 bg-white border border-indigo-100 rounded-xl text-xs" /></div>
+                                <DraftTextarea value={localWorkflowState?.handover_case_information || ''} onCommit={(v) => handleUpdateSummary('handover_case_information', v)} saveLabel="Save Notes" placeholder="Patient requirements, medical information, hospital/specialist, financial information, MOM, travel, accommodation, dates, requests, and important communication history..." className="w-full p-3 bg-white border border-indigo-100 rounded-xl text-xs min-h-[110px]" />
                                 <button onClick={handlePreparePatientHandover} className={`w-full p-3 rounded-xl font-black text-[10px] uppercase tracking-widest ${localWorkflowState?.handover_prepared_at ? 'bg-indigo-600 text-white' : 'bg-white text-indigo-700 border border-indigo-100'}`}>{localWorkflowState?.handover_prepared_at ? '✓ Complete Patient Handover Prepared' : 'Prepare Complete Patient Handover'}</button>
                                 <div className="p-5 bg-emerald-50/70 border border-emerald-100 rounded-3xl space-y-3">
                                   <div><p className="text-[9px] font-black text-emerald-700 uppercase tracking-widest">Patient Account & Profile</p><p className="mt-1 text-xs text-slate-600">Created automatically as soon as "Prepare Complete Patient Handover" is completed above. The CRM securely creates or links the Auth user and the existing WaruWenJo signup trigger creates the standard patient profile, patient record, and role.</p></div>
