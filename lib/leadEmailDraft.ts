@@ -63,8 +63,9 @@ export const LEAD_EMAIL_TEMPLATES: Record<LeadEmailKind, LeadEmailTemplate> = {
     subtitle: 'A dedicated doctor is looking after your case',
     content:
       '<p>Dear {{patient_name}},</p>' +
-      '<p>Thank you for trusting WaruWenJo with your care. <strong>{{doctor_name}}</strong> is personally reviewing the reports and information you shared, and will guide you through the next steps of your treatment journey.</p>' +
-      '<p>Our team will contact you shortly with the assessment and recommendations. If you have new reports or any questions in the meantime, simply reply to this email and we will be happy to help.</p>',
+      '<p>Thank you for trusting WaruWenJo with your care. <strong>{{doctor_name}}</strong> has personally reviewed the reports and information you shared.</p>' +
+      '{{assessment_block}}' +
+      '<p>Our team will contact you shortly with the detailed recommendations and next steps of your treatment journey. If you have new reports or any questions in the meantime, simply reply to this email and we will be happy to help.</p>',
   },
 
   clinical_doctor_email: {
@@ -76,6 +77,28 @@ export const LEAD_EMAIL_TEMPLATES: Record<LeadEmailKind, LeadEmailTemplate> = {
       '<p>{{doctor_name}} has reviewed your medical information. We will share the recommended hospital, specialist, procedure, and next steps with you.</p>' +
       '<p>Please reply if you have any questions or additional information.</p>',
   },
+};
+
+/**
+ * Builds the "Initial Doctor Assessment" section of the in-house doctor's email.
+ * The text is HTML-escaped here and line breaks are kept. Returns '' when there is no assessment.
+ */
+export const buildAssessmentBlock = (assessment: string): string => {
+  const text = String(assessment || '').trim();
+  if (!text) return '';
+  const escaped = text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+    .replace(/\r?\n/g, '<br/>');
+  return (
+    '<div style="margin:22px 0;padding:16px 18px;background:#f0fdfa;border-left:4px solid #0d7a6e;border-radius:8px;">' +
+    '<p style="margin:0 0 8px 0;font-size:11px;font-weight:bold;letter-spacing:1px;text-transform:uppercase;color:#0d7a6e;">Initial Doctor Assessment</p>' +
+    `<p style="margin:0;font-size:14px;line-height:1.6;color:#1e293b;">${escaped}</p>` +
+    '</div>'
+  );
 };
 
 /** Fills the {{placeholders}} of a template. Pass values that are already HTML-escaped. */

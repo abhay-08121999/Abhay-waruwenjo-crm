@@ -1120,37 +1120,26 @@ export const fetchInHouseDoctorUsers = async (): Promise<{
   data: InHouseDoctorUser[];
   error: Error | null;
 }> => {
-  // BDMs are not allowed to read other users' profile rows, so the list comes from a database function
-  // (crm_list_in_house_doctors) that returns only the active in-house doctors' names.
-  // If that function is not installed yet, fall back to the direct lookup below.
-  const rpcResult: any = await (supabase as any).rpc('crm_list_in_house_doctors');
-  if (!rpcResult.error && Array.isArray(rpcResult.data)) {
-    const listed = rpcResult.data
-      .map((row: any) => ({
-        userId: String(row.user_id),
-        name: String(row.full_name || row.username || row.email || 'In-house doctor'),
-        email: String(row.email || ''),
-      }))
-      .sort((a: InHouseDoctorUser, b: InHouseDoctorUser) => a.name.localeCompare(b.name));
-    return { data: listed, error: null };
+  const db = supabase as any;
+  // Same tables the rest of the CRM uses for role assignments (user_roles + crm_user_profiles).
+  const { data: roleRows, error: roleError } = await db
+    .from('user_roles')
+    .select('user_id')
+    .eq('role', 'in_house_doctor');
+
+  if (roleError) {
+    console.error('In-house doctor role lookup failed:', roleError);
+    return { data: [], error: roleError as unknown as Error };
   }
 
-  const { data: assignments, error: assignmentError } = await supabase
-    .from('crm_user_role_assignments')
-    .select('user_id, role:crm_roles!inner(role_key)')
-    .eq('role.role_key', 'in_house_doctor');
-
-  if (assignmentError) {
-    console.error('In-house doctor lookup failed:', assignmentError);
-    return { data: [], error: assignmentError as unknown as Error };
-  }
-
-  const userIds = Array.from(new Set((assignments || []).map((a: any) => a.user_id).filter(Boolean)));
+  const userIds: string[] = Array.from(
+    new Set((roleRows || []).map((row: any) => String(row.user_id)).filter(Boolean)),
+  );
   if (!userIds.length) return { data: [], error: null };
 
-  const { data: profiles, error: profileError } = await supabase
+  const { data: profiles, error: profileError } = await db
     .from('crm_user_profiles')
-    .select('user_id, email, username, full_name, is_active')
+    .select('user_id, email, full_name, is_active')
     .in('user_id', userIds);
 
   if (profileError) {
@@ -1160,9 +1149,10 @@ export const fetchInHouseDoctorUsers = async (): Promise<{
 
   const doctors = (profiles || [])
     .filter((profile: any) => profile.is_active !== false)
-    .map((profile: any) => ({
+    .map((profile: any): InHouseDoctorUser => ({
       userId: String(profile.user_id),
-      name: String(profile.full_name || profile.username || profile.email || 'In-house doctor'),
+      // Show a person's name, never an ID. Fall back to email if the name is empty.
+      name: String(profile.full_name || profile.email || 'In-house doctor'),
       email: String(profile.email || ''),
     }))
     .sort((a: InHouseDoctorUser, b: InHouseDoctorUser) => a.name.localeCompare(b.name));
@@ -1229,10 +1219,9 @@ const ROLE_BLOCKED_ROUTES: Record<string, string[]> = {
     '#/pipeline',
     '#/reports',
   ],
-  // In-House Doctor: Dashboard, Consent Center, Medical Leads,
-  // Sales Pipeline and Patient Journey.
+  // In-House Doctor: Consent Center, Medical Leads,
+  // Sales Pipeline and Patient Journey. Dashboard is open.
   in_house_doctor: [
-    '#/',
     '#/consent',
     '#/leads',
     '#/pipeline',
