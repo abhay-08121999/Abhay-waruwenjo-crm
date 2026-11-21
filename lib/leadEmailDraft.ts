@@ -5,7 +5,8 @@ export type LeadEmailKind =
   | 'document_request'
   | 'vil_form'
   | 'personal_doctor_email'
-  | 'clinical_doctor_email';
+  | 'clinical_doctor_email'
+  | 'advance_payment';
 
 export interface LeadEmailTemplate {
   subject: string;
@@ -76,26 +77,49 @@ export const LEAD_EMAIL_TEMPLATES: Record<LeadEmailKind, LeadEmailTemplate> = {
       '<p>{{doctor_name}} has reviewed your medical information. We will share the recommended hospital, specialist, procedure, and next steps with you.</p>' +
       '<p>Please reply if you have any questions or additional information.</p>',
   },
+
+  advance_payment: {
+    subject: 'Your advance payment link',
+    title: 'Advance Payment',
+    subtitle: 'Secure payment link for your medical case',
+    content:
+      '<p>Dear {{patient_name}},</p>' +
+      '<p>Thank you for completing your medical visa form. To confirm your treatment, please complete the advance payment using the secure link below.</p>' +
+      '{{amount_block}}' +
+      '<p style="text-align:center;margin:26px 0;"><a href="{{payment_link}}" style="display:inline-block;background:#d97706;color:#ffffff;text-decoration:none;font-weight:bold;font-size:14px;padding:14px 28px;border-radius:12px;">Pay Advance Payment</a></p>' +
+      '<p><strong>Payment reference:</strong> {{payment_reference}}</p>' +
+      '<p>Please keep this reference for your records. If the button does not work, copy and paste this link into your browser:<br/>{{payment_link}}</p>' +
+      '<p>If you have any questions about the payment, simply reply to this email.</p>',
+  },
 };
 
 /**
  * Builds the "Initial Doctor Assessment" section of the in-house doctor's email.
- * The text is HTML-escaped here and line breaks are kept. Returns '' when there is no assessment.
+ * Includes the recommended next steps when they are provided.
+ * Text is HTML-escaped here and line breaks are kept. Returns '' when there is no assessment.
  */
-export const buildAssessmentBlock = (assessment: string): string => {
-  const text = String(assessment || '').trim();
-  if (!text) return '';
-  const escaped = text
+const escapeBlockText = (value: string): string =>
+  value
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;')
     .replace(/\r?\n/g, '<br/>');
+
+export const buildAssessmentBlock = (assessment: string, nextSteps: string = ''): string => {
+  const text = String(assessment || '').trim();
+  if (!text) return '';
+  const steps = String(nextSteps || '').trim();
+  const stepsBlock = steps
+    ? '<p style="margin:16px 0 8px 0;font-size:11px;font-weight:bold;letter-spacing:1px;text-transform:uppercase;color:#0d7a6e;">Recommended Next Steps</p>' +
+      `<p style="margin:0;font-size:14px;line-height:1.6;color:#1e293b;">${escapeBlockText(steps)}</p>`
+    : '';
   return (
     '<div style="margin:22px 0;padding:16px 18px;background:#f0fdfa;border-left:4px solid #0d7a6e;border-radius:8px;">' +
     '<p style="margin:0 0 8px 0;font-size:11px;font-weight:bold;letter-spacing:1px;text-transform:uppercase;color:#0d7a6e;">Initial Doctor Assessment</p>' +
-    `<p style="margin:0;font-size:14px;line-height:1.6;color:#1e293b;">${escaped}</p>` +
+    `<p style="margin:0;font-size:14px;line-height:1.6;color:#1e293b;">${escapeBlockText(text)}</p>` +
+    stepsBlock +
     '</div>'
   );
 };
@@ -121,6 +145,7 @@ export const LEAD_EMAIL_LOG_LABELS: Record<LeadEmailKind, string> = {
   vil_form: 'VIL Form Email Sent',
   personal_doctor_email: 'Personal Doctor Email Sent',
   clinical_doctor_email: 'Clinical Doctor Email Sent',
+  advance_payment: 'Advance Payment Link Email Sent',
 };
 
 /** Public site from the project README. Used for patient links when running on localhost. */

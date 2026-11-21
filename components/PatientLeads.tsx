@@ -46,6 +46,16 @@ class LeadDetailErrorBoundary extends React.Component<{ children: React.ReactNod
   }
 }
 
+// Rejects if a promise does not settle in time, so a hung request cannot leave the UI stuck.
+const withTimeout = <T,>(promise: Promise<T>, ms: number, message: string): Promise<T> =>
+  new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), ms);
+    promise.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (error) => { clearTimeout(timer); reject(error); },
+    );
+  });
+
 const escapeEmailHtml = (value: string) => String(value || '')
   .replace(/&/g, '&amp;')
   .replace(/</g, '&lt;')
@@ -264,6 +274,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   const [isGeneratingCallSummary, setIsGeneratingCallSummary] = useState(false);
   const [isSendingDocumentRequest, setIsSendingDocumentRequest] = useState(false);
   const [isSendingVilForm, setIsSendingVilForm] = useState(false);
+  const [isSendingPaymentLink, setIsSendingPaymentLink] = useState(false);
   const [isUploadingVisa, setIsUploadingVisa] = useState(false);
   const [bdmUsers, setBdmUsers] = useState<any[]>([]);
   const [userDirectory, setUserDirectory] = useState<Record<string, string>>({});
@@ -572,7 +583,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
     return {
       stage1: stage(1, 'New Lead', 'Triage', 'stage1_checklist', ['duplicate_check_done', 'duplicate_result', 'lead_genuine_decision', 'spam_reason', 'discovery_requirements']),
       stage2: stage(2, 'Contact Attempted', 'Outreach', 'stage2_checklist', ['contact_attempt_count', 'contact_attempts', 'first_contact_at', 'last_attempt_at', 'call_outcome', 'response_outcome', 'call_notes', 'call_summary', 'ai_call_summary', 'callback_date', 'callback_due_at']),
-      stage3: stage(3, 'Medical Documents', 'Documents', 'stage3_checklist', ['process_explained_at', 'document_request_sent_at', 'documents_received_count', 'document_request_whatsapp_message']),
+      stage3: stage(3, 'Medical Documents', 'Documents', 'stage3_checklist', ['process_explained_at', 'document_request_sent_at', 'documents_received_count', 'document_request_whatsapp_message', 'assigned_bdm_name']),
       stage4: stage(4, 'In-House Doctor Interaction', 'Doctor Inbox', 'stage4_checklist', ['assigned_doctor_name', 'doctor_inbox_status', 'doctor_assigned_at', 'doctor_call_notes', 'doctor_call_at', 'personal_email_sent_at', 'initial_doctor_assessment', 'doctor_next_steps', 'doctor_interaction_complete', 'doctor_call_notes_saved_at', 'initial_doctor_assessment_saved_at']),
       stage5: stage(5, 'Clinical Qualification & Planning', 'Clinical', 'stage5_checklist', ['suggested_hospital', 'suggested_hospital_id', 'suggested_surgeon', 'suggested_surgeon_id', 'suggested_hospitals', 'suggested_surgeons', 'suggested_procedures', 'illness_history', 'clinical_summary', 'clinical_recommendation_finalized', 'clinical_review_confirmed', 'clinical_review_confirmed_at', 'clinical_review_confirmed_by', 'clinical_decision', 'clinical_report_generated_at']),
       stage6: stage(6, 'Financial & Logistics Proposal', 'BDM Pipeline', 'stage6_checklist', ['quotation_details', 'quotation_items', 'travel_accommodation', 'patient_concerns', 'financial_proposal_pdf', 'proposal_sent_at', 'patient_interest', 'patient_interest_reason', 'estimated_cost_min', 'estimated_cost_max', 'estimated_cost_currency', 'estimated_cost_notes', 'specialist_consultation_booked']),
@@ -589,6 +600,24 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
     if (!canWriteStage(activeWorkflowStage) || isViewOnlyStage) return { error: new Error('Read-only access to this stage') };
     const nextState = { ...(workflowStateRef.current || localWorkflowState || {}), ...patch };
     const stageData = buildStageData(nextState);
+    // Stages 4 and 5 can only be changed by the assigned in-house doctor. For anyone else, keep the
+    // stored values exactly as they are, so an unrelated save (such as assigning a BDM in Stage 3)
+    // does not resend Stage 4/5 and get rejected by the database.
+    const assignedDoctorId = leads.find((l) => l.id === selectedLead.id)?.assignedTo ?? (selectedLead as any).assignedTo ?? '';
+    const isAssignedInHouseDoctor = !!currentUserId && assignedDoctorId === currentUserId;
+    if (!isAssignedInHouseDoctor) {
+      const storedStageData: Record<string, any> =
+        leads.find((l) => l.id === selectedLead.id)?.workflowState?.stage_data
+        || (selectedLead as any).workflowState?.stage_data
+        || {};
+      for (const key of ['stage4', 'stage5']) {
+        if (key in storedStageData) {
+          stageData[key] = storedStageData[key];
+        } else {
+          delete stageData[key];
+        }
+      }
+    }
     workflowStateRef.current = nextState;
     setLocalWorkflowState(nextState);
     const leadId = selectedLead.id;
@@ -1174,17 +1203,38 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
 
   const handleProvidePaymentLink = async (link: string) => {
     if (denyIfLeadLocked()) return;
-    if (!link.trim()) {
+    if (isSendingPaymentLink || !selectedLead) return;
+    const paymentLink = link.trim();
+    if (!paymentLink) {
       toast.error('Enter the payment link before providing it to the patient.');
       return;
     }
-    const currentState = workflowStateRef.current || localWorkflowState || {};
-    await saveStage8Task('Provide Payment Link', {
-      payment_link: link.trim(),
-      payment_reference: currentState.payment_reference || `WJO-PAY-${Math.floor(Math.random() * 100000)}`,
-      payment_link_provided_at: new Date().toISOString(),
-    });
-    toast.success('Payment link recorded');
+    setIsSendingPaymentLink(true);
+    try {
+      const currentState = workflowStateRef.current || localWorkflowState || {};
+      const reference = currentState.payment_reference || `WJO-PAY-${Math.floor(Math.random() * 100000)}`;
+      const amount = currentState.payment_amount;
+      const result = await sendLeadTemplateEmail('advance_payment', {
+        patient_name: escapeEmailHtml(selectedLead.name || 'Patient'),
+        payment_link: escapeEmailHtml(paymentLink),
+        payment_reference: escapeEmailHtml(reference),
+        amount_block: amount
+          ? `<p><strong>Advance amount:</strong> ${escapeEmailHtml(String(amount))}</p>`
+          : '',
+      });
+      if (!result.success) return;
+      await saveStage8Task('Provide Payment Link', {
+        payment_link: paymentLink,
+        payment_reference: reference,
+        payment_link_provided_at: result.sentAt,
+        payment_link_email_sent_at: result.sentAt,
+      });
+      toast.success('Payment link emailed to patient');
+    } catch (error: any) {
+      toast.error(error?.message || 'Payment link email failed');
+    } finally {
+      setIsSendingPaymentLink(false);
+    }
   };
 
   const saveStage8Task = async (task: string, extraState: Record<string, any> = {}) => {
@@ -1195,78 +1245,81 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
     return result;
   };
 
+  const [isCreatingPatientAccount, setIsCreatingPatientAccount] = useState(false);
   const handlePreparePatientHandover = async () => {
     if (denyIfLeadLocked()) return;
     if (!selectedLead) {
       toast.error('No patient enquiry selected.');
       return;
     }
+    if (isCreatingPatientAccount) return;
 
+    setIsCreatingPatientAccount(true);
     const handoverPreparedAt = new Date().toISOString();
 
-    /*
-     * Stage 8 does not collect or validate patient account information.
-     * The patient enquiry is the source of truth. The backend receives only
-     * the enquiry ID and reads the patient information directly from
-     * patient_enquiries.
-     */
-    const saveResult = await saveStage8Task('Prepare Complete Patient Handover', {
-      handover_prepared_at: handoverPreparedAt,
-      handover_status: 'Prepared',
-      patient_account_status: 'processing',
-      patient_account_error: null,
-    });
-
-    if (saveResult?.error) {
-      return;
-    }
-
-    /*
-     * Do not pass name/email/phone/country/age/gender from the UI.
-     * The Edge Function reads those values from patient_enquiries.
-     */
-    const { data: accountData, error: accountError } =
-      await createPatientAccountFromEnquiry(selectedLead.id);
-
-    if (accountError || !accountData?.user_id) {
+    // Always leave the status in a final state (created or failed). Never leave it on "processing".
+    const markAccountFailed = async (message: string) => {
       await saveStage8Task('Prepare Complete Patient Handover', {
         patient_account_status: 'failed',
-        patient_account_error:
-          accountError?.message ||
-          accountData?.error ||
-          'Patient account creation failed',
+        patient_account_error: message,
       });
+      toast.error(message);
+    };
 
-      toast.error(
-        accountError?.message ||
-        accountData?.error ||
-        'Patient account could not be created.'
+    try {
+      /*
+       * Do not pass name/email/phone/country/age/gender from the UI.
+       * The account service reads those values from patient_enquiries.
+       */
+      const saveResult = await saveStage8Task('Prepare Complete Patient Handover', {
+        handover_prepared_at: handoverPreparedAt,
+        handover_status: 'Prepared',
+        patient_account_status: 'processing',
+        patient_account_error: null,
+      });
+      if (saveResult?.error) return; // saveStage8Task already shows the sync error.
+
+      const { data: accountData, error: accountError } = await withTimeout(
+        createPatientAccountFromEnquiry(selectedLead.id),
+        30000,
+        'Patient account request timed out after 30 seconds. Check your connection and press Create Patient Account again.',
       );
 
-      return;
-    }
+      if (accountError || !accountData?.user_id) {
+        const reason =
+          accountError?.message ||
+          accountData?.error ||
+          'Patient account creation failed (no user id returned).';
+        console.error('Patient account creation failed:', accountError ?? accountData);
+        await markAccountFailed(reason);
+        return;
+      }
 
-    /*
-     * Account successfully created or linked.
-     */
-    await saveStage8Task('Create Patient Account', {
-      patient_user_id: accountData.user_id,
-      patient_profile_id: accountData.patient_id || null,
-      patient_account_created_at: new Date().toISOString(),
-      patient_account_status: accountData.account_status || 'created',
-      patient_invitation_sent_at: accountData.invitation_sent_at || null,
-      patient_account_error: null,
-    });
+      // Account successfully created or linked.
+      await saveStage8Task('Create Patient Account', {
+        patient_user_id: accountData.user_id,
+        patient_profile_id: accountData.patient_id || null,
+        patient_account_created_at: new Date().toISOString(),
+        patient_account_status: accountData.account_status || 'created',
+        patient_invitation_sent_at: accountData.invitation_sent_at || null,
+        patient_account_error: null,
+      });
 
-    toast.success(
-      accountData.account_status === 'linked_existing'
-        ? 'Existing WaruWenJo patient account linked successfully'
-        : 'Patient account created using the WaruWenJo signup backend'
-    );
+      toast.success(
+        accountData.account_status === 'linked_existing'
+          ? 'Existing WaruWenJo patient account linked successfully'
+          : 'Patient account created using the WaruWenJo signup backend'
+      );
 
-    // Best-effort: the patient account itself succeeded above even if this didn't.
-    if (accountData.warning) {
-      toast.error(accountData.warning);
+      // Best-effort: the patient account itself succeeded above even if this didn't.
+      if (accountData.warning) {
+        toast.error(accountData.warning);
+      }
+    } catch (error: any) {
+      console.error('Patient account creation crashed:', error);
+      await markAccountFailed(error?.message || 'Unexpected error while creating the patient account.');
+    } finally {
+      setIsCreatingPatientAccount(false);
     }
   };
 
@@ -1345,9 +1398,22 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   };
 
   // BDM ownership of leads
+  const [bdmNameLookup, setBdmNameLookup] = useState<Record<string, string>>({});
+  useEffect(() => {
+    const id = selectedLead?.assignedBdmId;
+    if (!id || bdmUsers.some((u) => u.id === id) || bdmNameLookup[id]) return;
+    supabase
+      .from('crm_user_profiles')
+      .select('full_name')
+      .eq('user_id', id)
+      .maybeSingle()
+      .then(({ data }) => {
+        if (data?.full_name) setBdmNameLookup((prev) => ({ ...prev, [id]: data.full_name as string }));
+      });
+  }, [selectedLead?.assignedBdmId, bdmUsers]);
   const bdmNameFor = (id?: string | null) => {
     if (!id) return 'Unassigned';
-    return bdmUsers.find((u) => u.id === id)?.full_name || 'Assigned BDM';
+    return bdmUsers.find((u) => u.id === id)?.full_name || bdmNameLookup[id] || 'Assigned BDM';
   };
   const bdmIdFor = (lead: any): string | null =>
     leads.find((l) => l.id === lead.id)?.assignedBdmId ?? lead.assignedBdmId ?? null;
@@ -1360,6 +1426,10 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
       return;
     }
     setLeads((prev) => prev.map((l) => (l.id === leadId ? { ...l, assignedBdmId: bdmId } : l)));
+    if (selectedLead?.id === leadId) {
+      const bdmName = bdmId ? (bdmUsers.find((u) => u.id === bdmId)?.full_name || '') : '';
+      await persistWorkflowPatch({ assigned_bdm_name: bdmName });
+    }
     await logAdminActivity('BDM Assigned', 'Patient Lead', leadId, { bdm_id: bdmId, bdm_name: bdmNameFor(bdmId) });
     loadActivityLogs(leadId);
     toast.success(bdmId ? `Assigned to ${bdmNameFor(bdmId)}` : 'BDM unassigned');
@@ -2038,7 +2108,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
     const result = await sendLeadTemplateEmail('personal_doctor_email', {
       patient_name: escapeEmailHtml(selectedLead.name || 'Patient'),
       doctor_name: escapeEmailHtml(localWorkflowState?.assigned_doctor_name || 'the In-House Doctor'),
-      assessment_block: buildAssessmentBlock(assessment),
+      assessment_block: buildAssessmentBlock(assessment, (localWorkflowState?.doctor_next_steps || '').trim()),
     });
     if (!result.success) return;
     await saveStage4Task('Send Personal Email to Patient', { personal_email_sent_at: result.sentAt });
@@ -2872,6 +2942,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
     setIsConvertingToCase(true);
     let caseData: { id?: string } | null = null;
     let error: { message?: string } | null = null;
+    let surgeonMissingLogin = false;
     try {
       const specialistDoctor = doctors.find((doctor) => doctor.id === currentState.suggested_surgeon_id)
         || doctors.find((doctor) => doctor.name === currentState.suggested_surgeon);
@@ -2886,15 +2957,12 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
           .maybeSingle();
         assignedToId = staffProfile?.id || null;
       }
-      if (!assignedToId) {
-        toast.error('The selected surgeon has no staff login with the same email. Create a profile for this surgeon, then try again.');
-        return;
-      }
+      surgeonMissingLogin = !assignedToId;
       const selectedHospital = hospitals.find((hospital) => hospital.id === currentState.suggested_hospital_id)
         || hospitals.find((hospital) => hospital.name === currentState.suggested_hospital);
       const hospitalId = selectedHospital?.id || currentState.suggested_hospital_id || null;
-      if (!assignedToId || !hospitalId) {
-        toast.error('Select a valid specialist doctor and hospital before creating the medical case.');
+      if (!hospitalId) {
+        toast.error('Select a valid hospital before creating the medical case.');
         return;
       }
       const notes = [
@@ -2912,7 +2980,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
         .join('\n\n') || null;
       const result = await convertProfileToCase(currentState.patient_user_id, lead.id, {
         treatmentName: lead.treatmentInterest,
-        assignedToId,
+        assignedToId: assignedToId ?? null,
         hospitalId,
         notes
       });
@@ -2953,6 +3021,10 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
       toast.error(error?.message || 'Medical case was not returned by Supabase. Check the browser console and SQL function response.');
       setIsConvertingToCase(false);
       return;
+    }
+
+    if (surgeonMissingLogin) {
+      toast(`Medical case created. The surgeon has no staff login with the same email, so the case is not assigned to a surgeon yet. Assign one later.`);
     }
 
     // The new medical case belongs to the same BDM as the lead
@@ -3349,13 +3421,13 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                   {bdmUsers.map((u) => <option key={u.id} value={u.id}>{u.full_name}</option>)}
                 </select>
               ) : (
-                <span className="text-xs font-black text-slate-700">{bdmNameFor(bdmIdFor(selectedLead))}</span>
+                <span className="text-xs font-black text-slate-700">{localWorkflowState?.assigned_bdm_name || bdmNameFor(bdmIdFor(selectedLead))}</span>
               )}
             </div>
 
             <div className="px-10 pt-2 flex items-center gap-3 flex-wrap">
               <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Assigned In-House Doctor</p>
-              {isInHouseDoctorOnly ? (
+              {canAssignBdm ? (
                 <select
                   value={inHouseIdFor(selectedLead)}
                   onChange={(e) => handleAssignInHouseDoctor(selectedLead.id, e.target.value || null)}
@@ -4162,17 +4234,18 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                                 <p className="text-[10px] font-black text-emerald-700 uppercase tracking-widest">Stage 8: Medical Case Handover</p>
                                 <p className="text-xs text-slate-600">The advance payment (payment link and verification) is completed here in Stage 8 before the lead is converted. Visa application steps are handled in Stage 7. Stage 8 then creates or links the patient website account, converts the patient into a medical case, and hands the connected record to CDM/WaruBuddy.</p>
                              </div>
-                             <div className="p-5 bg-amber-50 border border-amber-100 rounded-3xl space-y-3"><p className="text-[9px] font-black text-amber-700 uppercase tracking-widest">Advance Payment — Payment Link & Verification</p><button onClick={handleGenerateAdvancePaymentLink} className="w-full p-3 bg-indigo-600 text-white rounded-xl font-black text-[10px] uppercase tracking-widest">{localWorkflowState?.payment_reference ? '✓ Payment Link Generated' : 'Generate Payment Link'}</button><DraftInput value={localWorkflowState?.payment_link || ''} onChange={(e) => handleUpdateSummary('payment_link', e.target.value)} placeholder="https://payment.example.com/..." className="w-full p-3 bg-white border border-amber-100 rounded-xl text-xs font-bold" /><button onClick={() => handleProvidePaymentLink(localWorkflowState?.payment_link || '')} className="w-full p-3 bg-amber-600 text-white rounded-xl font-black text-[10px] uppercase tracking-widest">{localWorkflowState?.payment_link_provided_at ? '✓ Payment Link Provided' : 'Provide Payment Link'}</button><div className="grid grid-cols-2 gap-3"><DraftInput type="text" value={localWorkflowState?.payment_status || ''} onChange={(e) => handleUpdateSummary('payment_status', e.target.value)} placeholder="Payment status" className="p-3 bg-white border border-amber-100 rounded-xl text-xs" /><DraftInput type="number" value={localWorkflowState?.payment_amount ?? ''} onChange={(e) => handleUpdateSummary('payment_amount', e.target.value ? Number(e.target.value) : null)} placeholder="Amount" className="p-3 bg-white border border-amber-100 rounded-xl text-xs" /></div><button onClick={handleVerifyAdvancePayment} className={`w-full p-3 rounded-xl font-black text-[10px] uppercase tracking-widest ${localWorkflowState?.advance_payment_verified ? 'bg-teal-600 text-white' : 'bg-white text-teal-700 border border-teal-100'}`}>{localWorkflowState?.advance_payment_verified ? '✓ Advance Payment Verified' : 'Verify Advance Payment'}</button></div>
+                             <div className="p-5 bg-amber-50 border border-amber-100 rounded-3xl space-y-3"><p className="text-[9px] font-black text-amber-700 uppercase tracking-widest">Advance Payment — Payment Link & Verification</p><button onClick={handleGenerateAdvancePaymentLink} className="w-full p-3 bg-indigo-600 text-white rounded-xl font-black text-[10px] uppercase tracking-widest">{localWorkflowState?.payment_reference ? '✓ Payment Link Generated' : 'Generate Payment Link'}</button><DraftInput value={localWorkflowState?.payment_link || ''} onChange={(e) => handleUpdateSummary('payment_link', e.target.value)} placeholder="https://payment.example.com/..." className="w-full p-3 bg-white border border-amber-100 rounded-xl text-xs font-bold" /><div className="space-y-1"><button onClick={() => handleProvidePaymentLink(localWorkflowState?.payment_link || '')} disabled={isSendingPaymentLink || !localWorkflowState?.payment_link} className="w-full p-3 bg-amber-600 text-white rounded-xl font-black text-[10px] uppercase tracking-widest disabled:opacity-50">{isSendingPaymentLink ? 'Sending Email…' : localWorkflowState?.payment_link_provided_at ? 'Resend Payment Link Email' : 'Email Payment Link to Patient'}</button>{localWorkflowState?.payment_link_provided_at && <p className="text-[10px] font-bold text-amber-700">Emailed {new Date(localWorkflowState.payment_link_provided_at).toLocaleString()}</p>}</div><div className="grid grid-cols-2 gap-3"><DraftInput type="text" value={localWorkflowState?.payment_status || ''} onChange={(e) => handleUpdateSummary('payment_status', e.target.value)} placeholder="Payment status" className="p-3 bg-white border border-amber-100 rounded-xl text-xs" /><DraftInput type="number" value={localWorkflowState?.payment_amount ?? ''} onChange={(e) => handleUpdateSummary('payment_amount', e.target.value ? Number(e.target.value) : null)} placeholder="Amount" className="p-3 bg-white border border-amber-100 rounded-xl text-xs" /></div><button onClick={handleVerifyAdvancePayment} className={`w-full p-3 rounded-xl font-black text-[10px] uppercase tracking-widest ${localWorkflowState?.advance_payment_verified ? 'bg-teal-600 text-white' : 'bg-white text-teal-700 border border-teal-100'}`}>{localWorkflowState?.advance_payment_verified ? '✓ Advance Payment Verified' : 'Verify Advance Payment'}</button></div>
                                 <div className="p-5 bg-emerald-50/70 border border-emerald-100 rounded-3xl space-y-3">
                                   <div><p className="text-[9px] font-black text-emerald-700 uppercase tracking-widest">Patient Account & Profile</p><p className="mt-1 text-xs text-slate-600">Created when you press "Create Patient Account" below. The CRM securely creates or links the Auth user and the existing WaruWenJo signup trigger creates the standard patient profile, patient record, and role.</p></div>
                                   {localWorkflowState?.patient_user_id ? (
                                     <p className="text-[10px] font-bold text-emerald-700">✓ Account {String(localWorkflowState.patient_account_status || 'linked').replace(/_/g, ' ')}{localWorkflowState.patient_invitation_sent_at ? ' · Invitation sent' : ''}</p>
-                                  ) : localWorkflowState?.handover_prepared_at ? (
+                                  ) : localWorkflowState?.handover_prepared_at && localWorkflowState?.patient_account_status !== 'failed' ? (
                                     <p className="text-[10px] font-bold text-amber-700">Handover prepared — patient account provisioning is being completed.</p>
                                   ) : (
                                     <p className="text-[10px] font-bold text-slate-400">Patient account not created yet.</p>
                                   )}
-                                  <button onClick={handlePreparePatientHandover} disabled={Boolean(localWorkflowState?.patient_user_id) || isRefreshingAccountStatus} className="w-full p-3 rounded-xl font-black text-[10px] uppercase tracking-widest bg-indigo-600 text-white disabled:opacity-50">{localWorkflowState?.patient_user_id ? '✓ Patient Account Ready' : 'Create Patient Account'}</button>
+                                  {localWorkflowState?.patient_account_status === 'failed' && <p className="text-[10px] font-bold text-red-600 break-words">Account failed: {localWorkflowState.patient_account_error || 'Unknown error. Check the browser console.'}</p>}
+                                  <button onClick={handlePreparePatientHandover} disabled={isCreatingPatientAccount || isRefreshingAccountStatus} className="w-full p-3 rounded-xl font-black text-[10px] uppercase tracking-widest bg-indigo-600 text-white disabled:opacity-50">{localWorkflowState?.patient_user_id ? '✓ Patient Account Ready' : isCreatingPatientAccount ? 'Creating Account…' : localWorkflowState?.patient_account_status === 'failed' ? 'Retry Create Patient Account' : 'Create Patient Account'}</button>
                                 <button onClick={handleRefreshAccountStatus} disabled={Boolean(localWorkflowState?.patient_user_id) || isRefreshingAccountStatus} className={`w-full p-3 rounded-xl font-black text-[10px] uppercase tracking-widest ${localWorkflowState?.patient_user_id ? 'bg-emerald-600 text-white' : localWorkflowState?.handover_prepared_at ? 'bg-white text-emerald-700 border border-emerald-100' : 'bg-slate-100 text-slate-400 cursor-not-allowed'}`}>{localWorkflowState?.patient_user_id ? '✓ Patient Account Created & Linked' : isRefreshingAccountStatus ? 'Checking…' : 'Refresh Account Status'}</button>
                                 </div>
                                 <div className="p-5 bg-white border border-slate-100 rounded-3xl space-y-3">

@@ -329,6 +329,25 @@ const assignPatientToMedicalCase = async (enquiry: any, userId: string): Promise
  * a random password, exactly like a normal signup that hasn't verified its
  * email yet — the patient sets their own password via "Forgot password".
  */
+/**
+ * Finds an existing WaruWenJo patient profile by email, so an account that already
+ * exists can be linked to the enquiry. Returns null if no profile is found or the
+ * lookup is not permitted.
+ */
+const findPatientUserIdByEmail = async (email: string): Promise<string | null> => {
+  const { data, error } = await supabase
+    .from('profiles')
+    .select('id')
+    .eq('email', email.trim().toLowerCase())
+    .limit(1)
+    .maybeSingle();
+  if (error) {
+    console.error('Profile lookup by email failed:', error);
+    return null;
+  }
+  return (data as any)?.id ?? null;
+};
+
 export const createPatientProfileFromEnquiry = async (enquiryOrId: any) => {
   const enquiryId = typeof enquiryOrId === 'string' ? enquiryOrId : enquiryOrId?.id;
 
@@ -368,17 +387,24 @@ export const createPatientProfileFromEnquiry = async (enquiryOrId: any) => {
   if ((enquiry as any).user_id) {
     const linkedUserId = (enquiry as any).user_id as string;
     const records = await peekWebsitePatientRecords(linkedUserId);
-    const caseWarning = await assignPatientToMedicalCase(enquiry, linkedUserId);
-    return {
-      data: {
-        success: true,
-        user_id: linkedUserId,
-        patient_id: (records.patient as any)?.patient_id ?? (records.profile as any)?.patient_id ?? linkedUserId,
-        account_status: 'linked_existing',
-        ...(caseWarning ? { warning: caseWarning } : {}),
-      },
-      error: null,
-    };
+    if (records.profile || records.patient) {
+      const caseWarning = await assignPatientToMedicalCase(enquiry, linkedUserId);
+      return {
+        data: {
+          success: true,
+          user_id: linkedUserId,
+          patient_id: (records.patient as any)?.patient_id ?? (records.profile as any)?.patient_id ?? linkedUserId,
+          account_status: 'linked_existing',
+          ...(caseWarning ? { warning: caseWarning } : {}),
+        },
+        error: null,
+      };
+    }
+    // Stale link: the linked Auth user has no patient profile or record in the database
+    // (it was deleted or never finished provisioning). Clear the link and create a fresh account below.
+    console.warn('Stale patient link found, clearing it and creating a new account:', linkedUserId);
+    await supabase.from('patient_enquiries').update({ user_id: null } as any).eq('id', enquiryId);
+    (enquiry as any).user_id = null;
   }
 
   // signUp() needs a password. The patient never sees or uses this one —
@@ -396,7 +422,9 @@ export const createPatientProfileFromEnquiry = async (enquiryOrId: any) => {
     }
     return `${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}-${Math.random().toString(16).slice(2)}`;
   };
-  const throwawayPassword = `Wj-${randomToken()}-${randomToken()}`;
+  // Supabase rejects passwords longer than 72 characters. Keep this to 48 characters.
+  // The value is random and discarded right away, so only the length matters here.
+  const throwawayPassword = `Wj-${(randomToken() + randomToken()).replace(/[^a-zA-Z0-9]/g, '').slice(0, 48)}`;
 
   const { data: signUpData, error: signUpError } = await patientSignupClient.auth.signUp({
     email,
@@ -417,7 +445,23 @@ export const createPatientProfileFromEnquiry = async (enquiryOrId: any) => {
   let accountStatus: 'created' | 'linked_existing' = 'created';
 
   if (signUpError) {
-    return { data: null, error: new Error(`Patient account creation failed: ${signUpError.message}`) };
+    // Some Supabase projects (email confirmation off) return "User already registered"
+    // as an error instead of the empty-identities response. Treat that as an existing
+    // WaruWenJo account and link it, instead of failing.
+    if (!/already (registered|exists)/i.test(signUpError.message || '')) {
+      return { data: null, error: new Error(`Patient account creation failed: ${signUpError.message}`) };
+    }
+    const existingUserId = await findPatientUserIdByEmail(email);
+    if (!existingUserId) {
+      return {
+        data: null,
+        error: new Error(
+          'A WaruWenJo account already exists for this email, but it could not be matched automatically. Ask the patient to log in with this email, or link the account manually.',
+        ),
+      };
+    }
+    userId = existingUserId;
+    accountStatus = 'linked_existing';
   }
 
   // supabase-js quirk: signUp() on an email that already has an account returns
