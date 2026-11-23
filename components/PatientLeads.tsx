@@ -134,6 +134,77 @@ const formatMomDateTime = (value: unknown) => {
     : date.toLocaleString('en-GB', { day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 };
 
+// New Discovery Intake form. Keeps its own input state so typing re-renders only this form,
+// not the whole Patient Leads screen (which holds the board, detail pane and many effects).
+type NewIntakeValues = { name: string; treatmentInterest: string; country: string; urgency: string; email: string };
+const NewIntakeModal: React.FC<{
+  onClose: () => void;
+  onSubmit: (values: NewIntakeValues) => Promise<boolean>;
+}> = ({ onClose, onSubmit }) => {
+  const [values, setValues] = useState<NewIntakeValues>({
+    name: '', treatmentInterest: '', country: '', urgency: 'Standard', email: '',
+  });
+  const [submitting, setSubmitting] = useState(false);
+  const field = (key: keyof NewIntakeValues) =>
+    (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
+      setValues(prev => ({ ...prev, [key]: e.target.value }));
+  const inputClass = 'w-full mt-2 px-6 py-4 bg-slate-50 border border-slate-100 rounded-2xl outline-none font-bold';
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (submitting) return;
+    setSubmitting(true);
+    const ok = await onSubmit(values);
+    setSubmitting(false);
+    if (ok) onClose();
+  };
+
+  return (
+    <div className="fixed inset-0 z-[210] flex items-center justify-center p-4 bg-slate-900/80 backdrop-blur-xl animate-in fade-in duration-300">
+      <div className="bg-white w-full max-w-xl rounded-[3rem] shadow-2xl overflow-hidden animate-in zoom-in duration-300">
+        <div className="px-10 py-8 border-b border-slate-100 flex items-center justify-between bg-slate-900 text-white">
+          <div>
+            <h3 className="text-2xl font-black tracking-tight leading-none">New Discovery Intake</h3>
+            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-2">Manual Enquiry Registry</p>
+          </div>
+          <button type="button" onClick={onClose} className="p-3 hover:bg-white/10 rounded-2xl transition-all"><X size={24} /></button>
+        </div>
+        <form onSubmit={handleSubmit} className="p-10 space-y-6">
+          <div className="grid grid-cols-2 gap-5">
+            <div className="col-span-2">
+              <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest pl-1">Full Name</label>
+              <input required type="text" value={values.name} onChange={field('name')} className={inputClass} />
+            </div>
+            <div>
+              <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest pl-1">Clinical Interest</label>
+              <input required type="text" value={values.treatmentInterest} onChange={field('treatmentInterest')} className={inputClass} />
+            </div>
+            <div>
+              <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest pl-1">Nationality</label>
+              <input type="text" value={values.country} onChange={field('country')} className={inputClass} />
+            </div>
+            <div>
+              <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest pl-1">Urgency</label>
+              <select value={values.urgency} onChange={field('urgency')} className={inputClass}>
+                <option value="Standard">Standard</option>
+                <option value="Urgent">Urgent</option>
+                <option value="Emergency">Emergency</option>
+              </select>
+            </div>
+            <div>
+              <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest pl-1">Email</label>
+              <input required type="email" value={values.email} onChange={field('email')} className={inputClass} />
+            </div>
+          </div>
+          <button type="submit" disabled={submitting} className="w-full py-5 bg-teal-600 text-white rounded-[1.5rem] font-black text-xs uppercase tracking-widest shadow-xl hover:bg-teal-700 transition-all disabled:opacity-60">
+            {submitting ? 'Saving…' : 'Onboard Inquiry'}
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+};
+
 const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   // In-House Doctor can only work on stages 3, 4 and 5.
   const isInHouseDoctorOnly =
@@ -218,11 +289,6 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   // True when this BDM is not assigned or granted the open lead: it can be viewed but not changed.
   const activeLeadLocked = showDetailPane && !!selectedLead && isLeadLocked(selectedLead.id);
 
-  const [newLead, setNewLead] = useState<Partial<Lead>>({
-    status: LeadStatus.NEW,
-    urgency: 'Standard',
-  });
-
   const [selectedInHouseDoctor, setSelectedInHouseDoctor] = useState('');
   const [doctorReportPdf, setDoctorReportPdf] = useState<string | null>(null);
   const [clinicalNotesPdf, setClinicalNotesPdf] = useState<string | null>(null);
@@ -266,6 +332,8 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   const workflowSaveQueueRef = useRef<Promise<any>>(Promise.resolve());
   const [activityLogs, setActivityLogs] = useState<any[]>([]);
   const [enquiryDocuments, setEnquiryDocuments] = useState<any[]>([]);
+  const [isRefreshingDocuments, setIsRefreshingDocuments] = useState(false);
+  const [documentsCheckedAt, setDocumentsCheckedAt] = useState<Date | null>(null);
   const [isUploadingDocuments, setIsUploadingDocuments] = useState(false);
   const documentFileInputRef = useRef<HTMLInputElement>(null);
   const [callOutcomeDraft, setCallOutcomeDraft] = useState('');
@@ -489,7 +557,9 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
         if (has('Convert Lead to Medical Case', 'Create Patient Account')) merged8.push('Create Patient Account & Medical Case');
         if (has('CDM/WaruBuddy Accepts Handover', 'Confirm Case Ownership')) merged8.push('Handover to CDM/WaruBuddy');
         if (has('Complete Stage 8')) merged8.push('Complete Stage 8');
-        hydratedState.stage8_checklist = Array.from(new Set([...oldStage8.filter(task => merged8.includes(task)), ...merged8]));
+        // Keep every saved tick. Unknown/legacy names are removed by the normalisation below, so current
+        // task names (e.g. 'Collect Advance Payment') are no longer dropped each time the lead is opened.
+        hydratedState.stage8_checklist = Array.from(new Set([...oldStage8, ...merged8]));
       }
       // Stage 7 merged checklist: carry over ticks from the old, longer checklist.
       {
@@ -538,9 +608,30 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
     if (data) setActivityLogs(data);
   };
 
-  const loadEnquiryDocuments = async (leadId: string) => {
+  const loadEnquiryDocuments = async (leadId: string): Promise<number> => {
     const { data } = await fetchEnquiryDocuments(leadId);
+    const list = data || [];
     if (data) setEnquiryDocuments(data);
+    setDocumentsCheckedAt(new Date());
+    return list.length;
+  };
+
+  // Manual refresh so staff can see documents the patient uploaded from the emailed link.
+  const handleRefreshDocuments = async () => {
+    if (!selectedLead?.id || isRefreshingDocuments) return;
+    const before = enquiryDocuments.length;
+    setIsRefreshingDocuments(true);
+    try {
+      const after = await loadEnquiryDocuments(selectedLead.id);
+      const added = Math.max(0, after - before);
+      if (added) toast.success(`${added} new document${added === 1 ? '' : 's'} received`);
+      else toast('No new documents yet');
+    } catch (error) {
+      console.error('Document refresh failed:', error);
+      toast.error('Could not refresh documents. Please try again.');
+    } finally {
+      setIsRefreshingDocuments(false);
+    }
   };
 
   // Staff upload of patient documents (PDF, JPG, JPEG, PNG). Several files at once are supported.
@@ -2212,11 +2303,31 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
     return () => { cancelled = true; };
   }, [leads, bdmUsers, inHouseDoctors]);
 
+  // Name of the super admin, used as the lead owner while a lead has no BDM.
+  const [superAdminName, setSuperAdminName] = useState('');
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const { data, error } = await (supabase as any).rpc('get_super_admin_name');
+      if (error || cancelled) return;
+      setSuperAdminName(String(data || ''));
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  // Lead owner rules:
+  //  - Stage 4 and 5: the assigned in-house doctor.
+  //  - Otherwise: the assigned BDM.
+  //  - No BDM assigned: the super admin.
   const getLeadOwnerName = (lead: Lead) => {
-    if (lead.workflowState?.assigned_doctor_name) return lead.workflowState.assigned_doctor_name;
-    const ownerId = lead.assignedTo || lead.assignedBdmId;
-    if (!ownerId) return 'Unassigned';
-    return userNameFor(ownerId);
+    const stage = Number(lead.workflowStage) || 1;
+    if (stage === 4 || stage === 5) {
+      const doctorName = lead.workflowState?.assigned_doctor_name
+        || (lead.assignedTo ? userNameFor(lead.assignedTo) : '');
+      return doctorName || 'Unassigned';
+    }
+    if (lead.assignedBdmId) return userNameFor(lead.assignedBdmId);
+    return superAdminName || 'Super Admin';
   };
 
   // ── Welcome Email: generates PDF and sends email via Edge Function ──
@@ -2854,8 +2965,18 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
 
   // Custom roles only see leads that are currently in a stage they can read.
   // In-house doctors see only the leads assigned to them (Stage 3 to 5; editable on 4 and 5 only).
+  // Once an in-house doctor finishes Stage 5 the lead moves to Stage 6+, which they cannot open.
+  // Those leads stay on their board in a "Completed" column so they can still see them.
+  const isCompletedForDoctor = (lead: any) =>
+    isInHouseDoctorOnly && (Number(lead.workflowStage) || 1) >= 6;
+  // Board column membership. "completed" is only used for in-house doctors.
+  const columnLeads = (colId: string, source: any[]) =>
+    source.filter(l => colId === 'completed'
+      ? isCompletedForDoctor(l)
+      : (!isCompletedForDoctor(l) && l.status === colId));
   const visibleLeads = isInHouseDoctorOnly
-    ? leads.filter(lead => lead.assignedTo === currentUserId && canAccessStage(Number(lead.workflowStage) || 1))
+    ? leads.filter(lead => lead.assignedTo === currentUserId
+        && (canAccessStage(Number(lead.workflowStage) || 1) || isCompletedForDoctor(lead)))
     : customStageAccess
       ? leads.filter(lead => canAccessStage(Number(lead.workflowStage) || 1))
       : leads;
@@ -2886,28 +3007,25 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
     }
   };
 
-  const handleCreate = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (blockReadOnlyWrite(1)) return;
+  const handleCreate = async (values: NewIntakeValues): Promise<boolean> => {
+    if (blockReadOnlyWrite(1)) return false;
     const leadData = {
-      full_name: newLead.name,
-      email: newLead.email,
-      phone: newLead.phone,
-      treatment_interest: newLead.treatmentInterest,
-      country: newLead.country,
-      message: newLead.message,
-      urgency: newLead.urgency || 'Standard',
+      full_name: values.name,
+      email: values.email,
+      treatment_interest: values.treatmentInterest,
+      country: values.country,
+      urgency: values.urgency || 'Standard',
       source: 'CRM Portal'
     };
 
     const { error } = await createLead(leadData);
     if (error) {
       toast.error('Failed to create enquiry');
-    } else {
-      toast.success('Patient enquiry registered');
-      loadLeads();
-      setShowModal(false);
+      return false;
     }
+    toast.success('Patient enquiry registered');
+    loadLeads();
+    return true;
   };
 
   const handleStatusUpdate = async (id: string, status: string) => {
@@ -3131,8 +3249,8 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
               <Activity size={16} className="group-hover/restore:animate-pulse" />
             </button>
           )}
-          <span className={`text-[10px] font-black px-3.5 py-1.5 rounded-full uppercase tracking-wider border ${getStatusColor(lead.status)}`}>
-            {lead.status === 'won' ? 'Converted' : lead.status}
+          <span className={`text-[10px] font-black px-3.5 py-1.5 rounded-full uppercase tracking-wider border ${isCompletedForDoctor(lead) ? 'bg-emerald-100 text-emerald-700 border-emerald-300' : getStatusColor(lead.status)}`}>
+            {isCompletedForDoctor(lead) ? 'Completed' : lead.status === 'won' ? 'Converted' : lead.status}
           </span>
         </div>
       </div>
@@ -3144,11 +3262,15 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
     { id: 'contacted', label: 'Follow Up', icon: <Clock size={14} /> },
     { id: 'qualified', label: 'Clinical Triage', icon: <CheckCircle2 size={14} /> }
   ];
+  const boardColumns = isInHouseDoctorOnly
+    ? [...columns, { id: 'completed', label: 'Completed', icon: <CheckCircle2 size={14} /> }]
+    : columns;
   // Visual theme of each board column (colours only).
   const COLUMN_THEME: Record<string, { badge: string; lane: string; icon: string }> = {
     new: { badge: 'bg-gradient-to-r from-sky-500 to-blue-600 shadow-sky-500/40', lane: 'bg-gradient-to-b from-sky-50 via-sky-50/40 to-white border-sky-200', icon: 'bg-sky-100 text-sky-600' },
     contacted: { badge: 'bg-gradient-to-r from-violet-500 to-fuchsia-500 shadow-violet-500/40', lane: 'bg-gradient-to-b from-violet-50 via-violet-50/40 to-white border-violet-200', icon: 'bg-violet-100 text-violet-600' },
     qualified: { badge: 'bg-gradient-to-r from-amber-400 to-orange-500 shadow-amber-500/40', lane: 'bg-gradient-to-b from-amber-50 via-amber-50/40 to-white border-amber-200', icon: 'bg-amber-100 text-amber-600' },
+    completed: { badge: 'bg-gradient-to-r from-emerald-500 to-teal-500 shadow-emerald-500/40', lane: 'bg-gradient-to-b from-emerald-50 via-emerald-50/40 to-white border-emerald-200', icon: 'bg-emerald-100 text-emerald-600' },
   };
 
   return (
@@ -3257,7 +3379,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
 
       {viewMode === 'BOARD' ? (
         <div className="flex gap-5 overflow-x-auto pb-10 custom-scrollbar-hide pt-2 snap-x">
-          {columns.map(col => (
+          {boardColumns.map(col => (
             <div key={col.id} className="pl-column flex-shrink-0 w-[min(88vw,420px)] snap-start">
               <div className="flex items-center justify-between mb-6 px-4">
                 <div className="flex items-center gap-3">
@@ -3265,11 +3387,11 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                   <h3 className="font-black text-slate-800 text-sm uppercase tracking-[0.15em]">{col.label}</h3>
                 </div>
                 <span className={`text-xs font-black text-white px-3.5 py-1.5 rounded-xl shadow-lg ${(COLUMN_THEME[col.id] || COLUMN_THEME.new).badge}`}>
-                  {visibleLeads.filter(l => l.status === col.id).length}
+                  {columnLeads(col.id, visibleLeads).length}
                 </span>
               </div>
               <div className={`space-y-4 p-3.5 rounded-3xl min-h-[620px] border-2 shadow-inner ${(COLUMN_THEME[col.id] || COLUMN_THEME.new).lane}`}>
-                {filteredLeads.filter(l => l.status === col.id).map(lead => (
+                {columnLeads(col.id, filteredLeads).map(lead => (
                   <LeadCard key={lead.id} lead={lead} />
                 ))}
               </div>
@@ -3283,11 +3405,11 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                 <h3 className="font-black text-slate-800 text-sm uppercase tracking-[0.15em]">Converted Cases</h3>
               </div>
               <span className="text-xs font-black bg-gradient-to-r from-emerald-500 to-teal-500 shadow-lg shadow-emerald-500/40 text-white px-3.5 py-1.5 rounded-xl">
-                {visibleLeads.filter(l => l.status === 'won').length}
+                {columnLeads('won', visibleLeads).length}
               </span>
             </div>
             <div className="space-y-4 bg-gradient-to-b from-emerald-50 to-white p-5 rounded-[3rem] min-h-[700px] border-2 border-dashed border-emerald-300/70 opacity-90 hover:opacity-100 transition-opacity">
-              {filteredLeads.filter(l => l.status === 'won').map(lead => (
+              {columnLeads('won', filteredLeads).map(lead => (
                 <LeadCard key={lead.id} lead={lead} />
               ))}
             </div>
@@ -3300,11 +3422,11 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                 <h3 className="font-black text-slate-800 text-sm uppercase tracking-[0.15em]">Lost / Dropped</h3>
               </div>
               <span className="text-xs font-black bg-gradient-to-r from-rose-500 to-pink-500 shadow-lg shadow-rose-500/40 text-white px-3.5 py-1.5 rounded-xl">
-                {visibleLeads.filter(l => l.status === 'lost').length}
+                {columnLeads('lost', visibleLeads).length}
               </span>
             </div>
             <div className="space-y-4 bg-gradient-to-b from-rose-50 to-white p-5 rounded-[3rem] min-h-[700px] border-2 border-dashed border-rose-300/70 opacity-90 hover:opacity-100 transition-opacity">
-              {filteredLeads.filter(l => l.status === 'lost').map(lead => (
+              {columnLeads('lost', filteredLeads).map(lead => (
                 <LeadCard key={lead.id} lead={lead} />
               ))}
             </div>
@@ -3348,8 +3470,8 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                         <span className={`text-[9px] font-black px-4 py-1.5 rounded-full uppercase tracking-widest border ${getUrgencyStyles(lead.urgency || 'Standard')}`}>
                           {lead.urgency || 'Standard'}
                         </span>
-                        <span className={`text-[9px] font-black px-4 py-1.5 rounded-full uppercase tracking-widest border ${getStatusColor(lead.status)}`}>
-                          {lead.status === 'won' ? 'Converted' : lead.status}
+                        <span className={`text-[9px] font-black px-4 py-1.5 rounded-full uppercase tracking-widest border ${isCompletedForDoctor(lead) ? 'bg-emerald-100 text-emerald-700 border-emerald-300' : getStatusColor(lead.status)}`}>
+                          {isCompletedForDoctor(lead) ? 'Completed' : lead.status === 'won' ? 'Converted' : lead.status}
                         </span>
                         {(() => {
                           const choice = choiceFor(lead);
@@ -3771,7 +3893,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                                 {localWorkflowState?.document_request_sent_at && <p className="text-[10px] font-bold text-teal-700">Sent {new Date(localWorkflowState.document_request_sent_at).toLocaleString()}</p>}
                              </div>
                              <div className="p-5 bg-white border border-slate-100 rounded-3xl space-y-3">
-                                <div className="flex items-center justify-between"><p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Received Medical Documents</p><span className="px-2 py-1 bg-slate-100 rounded-lg text-[9px] font-black">{enquiryDocuments.length} received</span></div>
+                                <div className="flex items-center justify-between"><p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Received Medical Documents</p><div className="flex items-center gap-2"><span className="px-2 py-1 bg-slate-100 rounded-lg text-[9px] font-black">{enquiryDocuments.length} received</span><button onClick={handleRefreshDocuments} disabled={isRefreshingDocuments} title="Check for documents the patient uploaded" className="px-2 py-1 bg-white border border-teal-200 text-teal-700 rounded-lg text-[9px] font-black uppercase tracking-widest hover:bg-teal-50 disabled:opacity-60 flex items-center gap-1"><span className={isRefreshingDocuments ? "inline-block animate-spin" : "inline-block"}>&#x21bb;</span>{isRefreshingDocuments ? 'Checking…' : 'Refresh status'}</button></div></div>{documentsCheckedAt && <p className="text-[9px] font-bold text-slate-400">Last checked {documentsCheckedAt.toLocaleTimeString()}</p>}
                                 <input ref={documentFileInputRef} type="file" multiple accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" className="hidden" onChange={handleStaffDocumentUpload} />
                                 <button onClick={() => documentFileInputRef.current?.click()} disabled={isUploadingDocuments} className="w-full p-3 border-2 border-dashed border-teal-200 text-teal-700 rounded-xl font-black text-[10px] uppercase tracking-widest hover:bg-teal-50 disabled:opacity-60 disabled:cursor-wait"><Plus size={14} className="inline mr-2" />{isUploadingDocuments ? 'Uploading...' : 'Upload Documents (PDF, JPG, JPEG, PNG)'}</button>
                                 {enquiryDocuments.length === 0 ? <p className="text-xs text-slate-500">No documents received yet. Upload them here, or the patient can use the emailed link.</p> : <div className="space-y-2">{enquiryDocuments.map(doc => <div key={doc.id} className="p-3 bg-slate-50 rounded-xl border border-slate-100"><div className="flex items-center justify-between gap-3"><a href={doc.file_url} target="_blank" rel="noreferrer" className="text-xs font-bold text-teal-700 hover:underline truncate">{doc.file_name}</a><span className="text-[9px] font-black uppercase text-emerald-700">Upload checks passed</span></div><p className="text-[10px] text-slate-400 mt-1">{new Date(doc.created_at).toLocaleString()} · {Math.round((doc.file_size || 0) / 1024)} KB</p></div>)}</div>}
@@ -4439,46 +4561,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
 
       {/* MODALS */}
       {showModal && (
-        <div className="fixed inset-0 z-[210] flex items-center justify-center p-4 bg-slate-900/80 backdrop-blur-xl animate-in fade-in duration-300">
-          <div className="bg-white w-full max-w-xl rounded-[3rem] shadow-2xl overflow-hidden animate-in zoom-in duration-300">
-            <div className="px-10 py-8 border-b border-slate-100 flex items-center justify-between bg-slate-900 text-white">
-              <div>
-                <h3 className="text-2xl font-black tracking-tight leading-none">New Discovery Intake</h3>
-                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-2">Manual Enquiry Registry</p>
-              </div>
-              <button onClick={() => setShowModal(false)} className="p-3 hover:bg-white/10 rounded-2xl transition-all"><X size={24} /></button>
-            </div>
-            <form onSubmit={handleCreate} className="p-10 space-y-6">
-              <div className="grid grid-cols-2 gap-5">
-                <div className="col-span-2">
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest pl-1">Full Name</label>
-                  <input required type="text" className="w-full mt-2 px-6 py-4 bg-slate-50 border border-slate-100 rounded-2xl outline-none font-bold" onChange={e => setNewLead({ ...newLead, name: e.target.value })} />
-                </div>
-                <div>
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest pl-1">Clinical Interest</label>
-                  <input required type="text" className="w-full mt-2 px-6 py-4 bg-slate-50 border border-slate-100 rounded-2xl outline-none font-bold" onChange={e => setNewLead({ ...newLead, treatmentInterest: e.target.value })} />
-                </div>
-                <div>
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest pl-1">Nationality</label>
-                  <input type="text" className="w-full mt-2 px-6 py-4 bg-slate-50 border border-slate-100 rounded-2xl outline-none font-bold" onChange={e => setNewLead({ ...newLead, country: e.target.value })} />
-                </div>
-                <div>
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest pl-1">Urgency</label>
-                  <select className="w-full mt-2 px-6 py-4 bg-slate-50 border border-slate-100 rounded-2xl outline-none font-bold" onChange={e => setNewLead({ ...newLead, urgency: e.target.value })}>
-                    <option value="Standard">Standard</option>
-                    <option value="Urgent">Urgent</option>
-                    <option value="Emergency">Emergency</option>
-                  </select>
-                </div>
-                <div>
-                   <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest pl-1">Email</label>
-                  <input required type="email" className="w-full mt-2 px-6 py-4 bg-slate-50 border border-slate-100 rounded-2xl outline-none font-bold" onChange={e => setNewLead({ ...newLead, email: e.target.value })} />
-                </div>
-              </div>
-              <button type="submit" className="w-full py-5 bg-teal-600 text-white rounded-[1.5rem] font-black text-xs uppercase tracking-widest shadow-xl hover:bg-teal-700 transition-all">Onboard Inquiry</button>
-            </form>
-          </div>
-        </div>
+        <NewIntakeModal onClose={() => setShowModal(false)} onSubmit={handleCreate} />
       )}
 
       {showStage3Handover && (
