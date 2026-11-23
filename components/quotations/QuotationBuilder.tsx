@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { supabase } from '../../integrations/supabase/client';
-import { ArrowLeft, Save, Send, Plus, Trash2, FileText, ChevronDown, Upload, CheckCircle, Eye, X, Printer } from 'lucide-react';
+import { ArrowLeft, Save, Send, Plus, Trash2, FileText, ChevronDown, Upload, CheckCircle, Eye, X, Printer, Mail, AlertTriangle, Sparkles, User } from 'lucide-react';
 import { jsPDF } from 'jspdf';
 import html2canvas from 'html2canvas';
 import { toast, Toaster } from 'sonner';
@@ -70,6 +70,24 @@ const QuotationBuilder: React.FC<QuotationBuilderProps> = ({ quotationId, onBack
   // Last send failure. Shown in a banner that stays on screen until the next attempt, because toasts disappear.
   const [sendError, setSendError] = useState<string | null>(null);
   const [leads, setLeads] = useState<any[]>([]);
+  // Ids can arrive as a string in one place and another type in another, so always compare them as text.
+  const sameId = (a: any, b: any) => a != null && b != null && String(a) === String(b);
+  const findLead = (id: any) => leads.find(l => sameId(l.id, id));
+  // The patient's email: the email column first, then any email saved inside the lead's workflow data.
+  const readLeadEmail = (lead: any): string => {
+    const direct = String(lead?.email ?? '').trim();
+    if (direct) return direct;
+    let state = lead?.workflow_state;
+    if (typeof state === 'string') { try { state = JSON.parse(state); } catch { state = null; } }
+    const stages: any[] = state?.stage_data ? Object.values(state.stage_data) : [];
+    for (const stage of stages) {
+      const data = stage?.data || {};
+      const value = String(data.patient_email ?? data.email ?? '').trim();
+      if (value) return value;
+    }
+    return '';
+  };
+  const isValidEmail = (value: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
   const [templates, setTemplates] = useState<any[]>([]);
   const [uploading, setUploading] = useState(false);
   const [uploadTrigger, setUploadTrigger] = useState<{items: any[], overrides: any} | null>(null);
@@ -179,6 +197,19 @@ const QuotationBuilder: React.FC<QuotationBuilderProps> = ({ quotationId, onBack
       loadQuotation(quotationId);
     }
   }, [quotationId]);
+
+  // If the selected patient is missing from the loaded list (list still loading, or very large), read just that patient.
+  useEffect(() => {
+    if (!leadId || findLead(leadId)) return;
+    supabase
+      .from('patient_enquiries')
+      .select('id, name:full_name, status, email, workflow_state')
+      .eq('id', leadId)
+      .maybeSingle()
+      .then(({ data }) => {
+        if (data) setLeads(prev => (prev.some(l => sameId(l.id, data.id)) ? prev : [...prev, data]));
+      });
+  }, [leadId, leads.length]);
 
   // New quotation opened from a patient lead: pre-select that patient.
   useEffect(() => {
@@ -320,9 +351,31 @@ const QuotationBuilder: React.FC<QuotationBuilderProps> = ({ quotationId, onBack
   }, [uploadTrigger]);
 
   const sendQuotationNow = async () => {
-    const recipient = leads.find(l => l.id === leadId);
-    if (!recipient?.email) {
-      const message = 'Select a patient that has an email address before sending.';
+    if (!leadId) {
+      const message = 'Select a patient before sending.';
+      setSendError(message);
+      toast.error(message, { duration: 10000 });
+      return;
+    }
+    let recipient: any = findLead(leadId);
+    let recipientEmail = readLeadEmail(recipient);
+    if (!isValidEmail(recipientEmail)) {
+      // The loaded list may be stale or incomplete, so read this patient straight from the database before giving up.
+      const { data: fresh } = await supabase
+        .from('patient_enquiries')
+        .select('id, name:full_name, status, email, workflow_state')
+        .eq('id', leadId)
+        .maybeSingle();
+      if (fresh) {
+        recipient = fresh;
+        recipientEmail = readLeadEmail(fresh);
+        setLeads(prev => (prev.some(l => sameId(l.id, fresh.id)) ? prev.map(l => (sameId(l.id, fresh.id) ? fresh : l)) : [...prev, fresh]));
+      }
+    }
+    if (!isValidEmail(recipientEmail)) {
+      const message = recipient
+        ? `${recipient.name || 'This patient'} has no valid email address on record. Add it on the patient lead, then send again.`
+        : 'The selected patient could not be found. Re-select the patient and try again.';
       setSendError(message);
       toast.error(message, { duration: 10000 });
       return;
@@ -333,9 +386,9 @@ const QuotationBuilder: React.FC<QuotationBuilderProps> = ({ quotationId, onBack
 
     setLoading(true);
     try {
-      const selectedLead = leads.find(l => l.id === leadId);
+      const selectedLead = recipient;
       const patientName = selectedLead?.name || 'Valued Patient';
-      const patientEmail = selectedLead?.email || 'N/A';
+      const patientEmail = recipientEmail;
       
       const selectedTemplate = templates.find(t => t.id === templateId);
       if (!selectedTemplate) {
@@ -428,7 +481,7 @@ const QuotationBuilder: React.FC<QuotationBuilderProps> = ({ quotationId, onBack
       let emailError: any = null;
       for (let attempt = 1; attempt <= 3; attempt++) {
         try {
-          await sendQuotationEmail({ toEmail: recipient.email, toName: patientName, pdfBase64 });
+          await sendQuotationEmail({ toEmail: recipientEmail, toName: patientName, pdfBase64 });
           emailError = null;
           break;
         } catch (err) {
@@ -696,9 +749,9 @@ const QuotationBuilder: React.FC<QuotationBuilderProps> = ({ quotationId, onBack
         return;
       }
 
-      const selectedLead = leads.find(l => l.id === leadId);
+      const selectedLead = findLead(leadId);
       const patientName = selectedLead?.name || '{{patient_name}}';
-      const patientEmail = selectedLead?.email || '{{patient_email}}';
+      const patientEmail = readLeadEmail(selectedLead) || '{{patient_email}}';
       const dateStr = new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
 
       const itemRows = items.map(item => `
@@ -737,185 +790,236 @@ const QuotationBuilder: React.FC<QuotationBuilderProps> = ({ quotationId, onBack
     }
   };
 
+  const selectedLeadInfo = findLead(leadId);
+  const selectedLeadEmail = readLeadEmail(selectedLeadInfo);
+  const currencySymbol = CURRENCY_SYMBOLS[currency] || currency;
+  const filteredTemplates = templates.filter(t => t.type === type);
+  const fieldClass = 'w-full px-4 py-3 bg-white border border-slate-200 rounded-xl text-sm font-semibold text-slate-700 shadow-sm hover:border-slate-300 focus:ring-4 focus:ring-teal-500/10 focus:border-teal-500 outline-none transition-all';
+  const stepBadge = 'w-6 h-6 rounded-lg bg-gradient-to-br from-teal-500 to-cyan-600 text-white text-[11px] font-black flex items-center justify-center shadow-md shadow-teal-500/30';
+
   return (<>
     <Toaster richColors position="top-right" />
-    <div className="bg-white rounded-[2rem] shadow-sm border border-slate-200 overflow-hidden min-h-[700px] flex flex-col">
+    <div className="bg-white rounded-[2rem] shadow-xl shadow-slate-200/70 border border-slate-200/80 overflow-hidden min-h-[700px] flex flex-col">
       {/* Header */}
-      <div className="p-6 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
-        <div className="flex items-center gap-4">
-          <button onClick={onBack} className="p-2 hover:bg-slate-200 rounded-lg transition-colors text-slate-500">
-            <ArrowLeft size={20} />
-          </button>
-          <div>
-            <h2 className="text-xl font-black text-slate-800">{quotationId ? 'Edit Quotation' : 'New Quotation'}</h2>
-            <p className="text-sm font-medium text-slate-500">Build and price your quotation</p>
+      <div className="relative px-6 sm:px-8 py-6 bg-gradient-to-r from-teal-600 via-teal-600 to-cyan-700 text-white overflow-hidden">
+        <div className="absolute -top-16 -right-10 w-64 h-64 rounded-full bg-white/10 blur-3xl pointer-events-none" />
+        <div className="absolute -bottom-24 left-1/3 w-64 h-64 rounded-full bg-cyan-300/10 blur-3xl pointer-events-none" />
+        <div className="relative flex flex-col lg:flex-row lg:items-center justify-between gap-5">
+          <div className="flex items-center gap-4">
+            <button onClick={onBack} aria-label="Back to quotations" className="p-2.5 bg-white/15 hover:bg-white/25 rounded-xl transition-colors border border-white/20">
+              <ArrowLeft size={18} />
+            </button>
+            <div>
+              <h2 className="text-2xl font-black tracking-tight leading-none">{quotationId ? 'Edit Quotation' : 'New Quotation'}</h2>
+              <p className="text-sm font-medium text-teal-50/80 mt-1.5">Build and price your quotation</p>
+            </div>
           </div>
-        </div>
-        <div className="flex gap-3">
-          <button
-            onClick={handlePreview}
-            disabled={previewLoading || !templateId}
-            title={!templateId ? 'Select a template to preview' : 'Preview quotation as PDF'}
-            className="flex items-center gap-2 px-6 py-2.5 bg-indigo-50 text-indigo-600 font-bold rounded-xl hover:bg-indigo-100 border border-indigo-200 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            <Eye size={18} /> {previewLoading ? 'Loading...' : 'Preview'}
-          </button>
-          <button 
-            onClick={() => handleSave()} 
-            disabled={loading}
-            className="flex items-center gap-2 px-6 py-2.5 bg-slate-100 text-slate-700 font-bold rounded-xl hover:bg-slate-200 transition-all"
-          >
-            <Save size={18} /> Save Draft
-          </button>
-          <button 
-            onClick={handleSend}
-            disabled={loading || sending}
-            className="flex items-center gap-2 px-6 py-2.5 bg-teal-600 text-white font-bold rounded-xl hover:bg-teal-700 transition-all shadow-lg shadow-teal-500/20 disabled:opacity-60 disabled:cursor-not-allowed"
-          >
-            <Send size={18} /> {sending ? 'Sending…' : 'Send to Patient'}
-          </button>
+          <div className="flex flex-wrap gap-3">
+            <button
+              onClick={handlePreview}
+              disabled={previewLoading || !templateId}
+              title={!templateId ? 'Select a template to preview' : 'Preview quotation as PDF'}
+              className="flex items-center gap-2 px-5 py-2.5 bg-white/15 text-white font-bold rounded-xl hover:bg-white/25 border border-white/25 backdrop-blur transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              <Eye size={17} /> {previewLoading ? 'Loading...' : 'Preview'}
+            </button>
+            <button
+              onClick={() => handleSave()}
+              disabled={loading}
+              className="flex items-center gap-2 px-5 py-2.5 bg-white text-slate-700 font-bold rounded-xl hover:bg-slate-50 shadow-lg shadow-black/10 transition-all disabled:opacity-60"
+            >
+              <Save size={17} /> Save Draft
+            </button>
+            <button
+              onClick={handleSend}
+              disabled={loading || sending}
+              className="flex items-center gap-2 px-6 py-2.5 bg-slate-900 text-white font-bold rounded-xl hover:bg-slate-800 hover:-translate-y-0.5 shadow-lg shadow-slate-900/30 transition-all disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:translate-y-0"
+            >
+              <Send size={17} /> {sending ? 'Sending…' : 'Send to Patient'}
+            </button>
+          </div>
         </div>
       </div>
 
       {sendError && (
-        <div role="alert" className="flex items-start justify-between gap-4 px-6 py-3 bg-red-50 border-b border-red-200 text-sm font-bold text-red-700">
-          <span>{sendError}</span>
+        <div role="alert" className="flex items-start justify-between gap-4 px-6 sm:px-8 py-3.5 bg-red-50 border-b border-red-200 text-sm font-bold text-red-700">
+          <span className="flex items-start gap-2.5"><AlertTriangle size={17} className="mt-0.5 shrink-0" />{sendError}</span>
           <button onClick={() => setSendError(null)} className="shrink-0 text-red-400 hover:text-red-600" aria-label="Dismiss error"><X size={16} /></button>
         </div>
       )}
 
       <div className="flex-1 flex flex-col lg:flex-row overflow-hidden">
         {/* Left Panel: Settings & Details */}
-        <div className="w-full lg:w-1/3 border-r border-slate-100 p-6 overflow-y-auto bg-slate-50/30">
-          <h3 className="text-xs font-black uppercase tracking-widest text-slate-400 mb-6">General Settings</h3>
-          
-          <div className="space-y-5">
-            <div>
-              <label className="block text-sm font-bold text-slate-700 mb-2">Linked Lead / Patient</label>
-              <select 
-                value={leadId} onChange={(e) => setLeadId(e.target.value)}
-                className="w-full px-4 py-2.5 bg-white border border-slate-200 rounded-xl text-sm font-medium text-slate-700 focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500 outline-none"
-              >
-                <option value="">Select a Lead...</option>
-                {leads.map(l => <option key={l.id} value={l.id}>{l.name} ({l.status})</option>)}
-              </select>
+        <div className="w-full lg:w-[36%] xl:w-[34%] border-r border-slate-100 p-6 sm:p-8 overflow-y-auto bg-gradient-to-b from-slate-50 to-white">
+          <h3 className="text-[11px] font-black uppercase tracking-[0.2em] text-slate-400 mb-6">General Settings</h3>
+
+          <div className="space-y-6">
+            {/* 1. Patient */}
+            <div className="space-y-3">
+              <label className="flex items-center gap-2.5 text-sm font-extrabold text-slate-800">
+                <span className={stepBadge}>1</span> Linked Lead / Patient
+              </label>
+              <div className="relative">
+                <select value={leadId} onChange={(e) => setLeadId(e.target.value)} className={`${fieldClass} appearance-none pr-10`}>
+                  <option value="">Select a Lead...</option>
+                  {leads.map(l => <option key={l.id} value={l.id}>{l.name} ({l.status})</option>)}
+                </select>
+                <ChevronDown size={16} className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+              </div>
+
+              {selectedLeadInfo ? (
+                <div className="flex items-center gap-3 p-3.5 rounded-2xl bg-white border border-slate-200 shadow-sm">
+                  <div className="w-11 h-11 rounded-xl bg-gradient-to-br from-teal-500 to-cyan-600 text-white font-black text-base flex items-center justify-center shrink-0 uppercase shadow-md shadow-teal-500/25">
+                    {(selectedLeadInfo.name || '?').trim().charAt(0) || <User size={18} />}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-extrabold text-slate-800 truncate">{selectedLeadInfo.name}</p>
+                    {selectedLeadEmail ? (
+                      <p className="flex items-center gap-1.5 text-xs font-semibold text-slate-500 truncate"><Mail size={12} className="shrink-0 text-teal-600" />{selectedLeadEmail}</p>
+                    ) : (
+                      <p className="flex items-center gap-1.5 text-xs font-bold text-amber-600"><AlertTriangle size={12} className="shrink-0" />No email on record</p>
+                    )}
+                  </div>
+                  <span className={`shrink-0 text-[10px] font-black uppercase tracking-wider px-2.5 py-1 rounded-full border ${selectedLeadEmail ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-amber-50 text-amber-700 border-amber-200'}`}>
+                    {selectedLeadEmail ? 'Ready' : 'Needs email'}
+                  </span>
+                </div>
+              ) : (
+                <p className="text-xs font-medium text-slate-400">Choose the patient this quotation is for. Their email is used when you send it.</p>
+              )}
             </div>
 
-            <div>
-              <label className="block text-sm font-bold text-slate-700 mb-2">Quotation Type</label>
-              <div className="flex bg-slate-100 p-1 rounded-xl">
-                <button 
-                  onClick={() => setType('clinical')}
-                  className={`flex-1 py-2 text-sm font-bold rounded-lg transition-colors ${type === 'clinical' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
-                >
-                  Clinical
-                </button>
-                <button 
-                  onClick={() => setType('business')}
-                  className={`flex-1 py-2 text-sm font-bold rounded-lg transition-colors ${type === 'business' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
-                >
-                  Business
-                </button>
+            {/* 2. Type */}
+            <div className="space-y-3">
+              <label className="flex items-center gap-2.5 text-sm font-extrabold text-slate-800">
+                <span className={stepBadge}>2</span> Quotation Type
+              </label>
+              <div className="flex bg-slate-100 p-1.5 rounded-2xl border border-slate-200/70">
+                {(['clinical', 'business'] as const).map(option => (
+                  <button
+                    key={option}
+                    type="button"
+                    onClick={() => setType(option)}
+                    className={`flex-1 py-2.5 text-sm font-bold rounded-xl capitalize transition-all ${type === option ? 'bg-white text-teal-700 shadow-md shadow-slate-300/50' : 'text-slate-500 hover:text-slate-700'}`}
+                  >
+                    {option}
+                  </button>
+                ))}
               </div>
             </div>
 
-            <div>
-              <label className="block text-sm font-bold text-slate-700 mb-2">Document Template</label>
-              <select 
-                value={templateId} onChange={(e) => setTemplateId(e.target.value)}
-                className="w-full px-4 py-2.5 bg-white border border-slate-200 rounded-xl text-sm font-medium text-slate-700 focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500 outline-none"
-              >
-                <option value="">Select Template...</option>
-                {templates.filter(t => t.type === type).map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
-              </select>
-
+            {/* 3. Template */}
+            <div className="space-y-3">
+              <label className="flex items-center gap-2.5 text-sm font-extrabold text-slate-800">
+                <span className={stepBadge}>3</span> Document Template
+              </label>
+              <div className="relative">
+                <select value={templateId} onChange={(e) => setTemplateId(e.target.value)} className={`${fieldClass} appearance-none pr-10`}>
+                  <option value="">Select Template...</option>
+                  {filteredTemplates.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                </select>
+                <ChevronDown size={16} className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+              </div>
             </div>
 
-            <div>
-              <label className="block text-sm font-bold text-slate-700 mb-2">Currency</label>
-              <select 
-                value={currency} onChange={(e) => handleCurrencyChange(e.target.value)}
-                className="w-full px-4 py-2.5 bg-white border border-slate-200 rounded-xl text-sm font-medium text-slate-700 focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500 outline-none"
-              >
-                {Object.keys(exchangeRates).map((curr) => (
-                  <option key={curr} value={curr}>
-                    {curr} ({CURRENCY_SYMBOLS[curr] || curr})
-                  </option>
-                ))}
-              </select>
+            {/* 4. Currency */}
+            <div className="space-y-3">
+              <label className="flex items-center gap-2.5 text-sm font-extrabold text-slate-800">
+                <span className={stepBadge}>4</span> Currency
+              </label>
+              <div className="relative">
+                <select value={currency} onChange={(e) => handleCurrencyChange(e.target.value)} className={`${fieldClass} appearance-none pr-10`}>
+                  {Object.keys(exchangeRates).map((curr) => (
+                    <option key={curr} value={curr}>{curr} ({CURRENCY_SYMBOLS[curr] || curr})</option>
+                  ))}
+                </select>
+                <ChevronDown size={16} className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+              </div>
+            </div>
+
+            {/* Readiness */}
+            <div className="flex flex-wrap gap-2 pt-1">
+              {[
+                { ok: !!leadId, label: 'Patient' },
+                { ok: !!selectedLeadEmail, label: 'Email' },
+                { ok: !!templateId, label: 'Template' },
+                { ok: items.length > 0, label: `${items.length} item${items.length !== 1 ? 's' : ''}` },
+              ].map(chip => (
+                <span key={chip.label} className={`inline-flex items-center gap-1.5 text-[11px] font-bold px-3 py-1.5 rounded-full border ${chip.ok ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-slate-50 text-slate-400 border-slate-200'}`}>
+                  {chip.ok ? <CheckCircle size={12} /> : <X size={12} />} {chip.label}
+                </span>
+              ))}
             </div>
           </div>
         </div>
 
         {/* Right Panel: Pricing Engine & Items */}
-        <div className="flex-1 p-6 overflow-y-auto">
-          
+        <div className="flex-1 p-6 sm:p-8 overflow-y-auto bg-white">
+
           {/* AI / Document Extraction Section */}
-          <div className="mb-6 p-5 bg-teal-50/50 border border-teal-100 rounded-2xl flex items-center justify-between">
-            <div>
-              <h4 className="text-sm font-bold text-teal-800">Auto-fill from Document</h4>
-              <p className="text-xs font-medium text-teal-600/70 mt-1">Upload a medical report or previous quotation to auto-extract line items.</p>
+          <div className="mb-8 p-5 sm:p-6 bg-gradient-to-r from-teal-50 via-emerald-50/60 to-cyan-50 border border-dashed border-teal-300/70 rounded-3xl flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div className="flex items-start gap-4">
+              <div className="w-11 h-11 rounded-2xl bg-white text-teal-600 border border-teal-100 shadow-sm flex items-center justify-center shrink-0">
+                <Sparkles size={20} />
+              </div>
+              <div>
+                <h4 className="text-sm font-extrabold text-teal-900">Auto-fill from Document</h4>
+                <p className="text-xs font-medium text-teal-700/80 mt-1 max-w-md">Upload a medical report or previous quotation to auto-extract line items.</p>
+              </div>
             </div>
             <div>
-              <input 
-                type="file" 
-                id="file-upload" 
-                className="hidden" 
-                accept=".pdf,.png,.jpg,.jpeg"
-                onChange={handleFileUpload}
-                disabled={uploading}
-              />
-              <label 
-                htmlFor="file-upload" 
-                className={`cursor-pointer flex items-center gap-2 px-4 py-2 bg-white text-teal-700 font-bold text-sm rounded-xl border border-teal-200 hover:bg-teal-50 transition-colors shadow-sm ${uploading ? 'opacity-50 cursor-wait' : ''}`}
+              <input type="file" id="file-upload" className="hidden" accept=".pdf,.png,.jpg,.jpeg" onChange={handleFileUpload} disabled={uploading} />
+              <label
+                htmlFor="file-upload"
+                className={`cursor-pointer inline-flex items-center gap-2 px-5 py-2.5 bg-white text-teal-700 font-bold text-sm rounded-xl border border-teal-200 hover:bg-teal-600 hover:text-white hover:border-teal-600 transition-all shadow-sm ${uploading ? 'opacity-50 cursor-wait' : ''}`}
               >
                 <Upload size={16} /> {uploading ? 'Processing...' : 'Upload File'}
               </label>
             </div>
           </div>
 
-          <div className="flex items-center justify-between mb-6">
-            <h3 className="text-xs font-black uppercase tracking-widest text-slate-400">Line Items & Pricing</h3>
-            <button onClick={addItem} className="text-teal-600 text-sm font-bold hover:text-teal-700 flex items-center gap-1">
+          <div className="flex items-center justify-between mb-5">
+            <h3 className="text-[11px] font-black uppercase tracking-[0.2em] text-slate-400">Line Items & Pricing</h3>
+            <button onClick={addItem} className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-teal-50 text-teal-700 text-sm font-bold border border-teal-100 hover:bg-teal-600 hover:text-white hover:border-teal-600 transition-all">
               <Plus size={16} /> Add Line Item
             </button>
           </div>
 
           <div className="space-y-4">
             {items.map((item, index) => (
-              <div key={item.id} className="flex flex-col sm:flex-row gap-4 p-4 border border-slate-100 rounded-2xl bg-white shadow-sm group">
-                <div className="flex-1">
-                  <label className="block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">Description</label>
-                  <input 
+              <div key={item.id} className="relative flex flex-col sm:flex-row sm:items-end gap-4 p-5 pl-6 border border-slate-200/80 rounded-2xl bg-white shadow-sm hover:shadow-lg hover:shadow-slate-200/70 hover:border-teal-200 transition-all group">
+                <span className="absolute left-0 top-4 bottom-4 w-1 rounded-r-full bg-gradient-to-b from-teal-400 to-cyan-500 opacity-70 group-hover:opacity-100 transition-opacity" />
+                <div className="flex-1 min-w-0">
+                  <label className="block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5">Item {index + 1} · Description</label>
+                  <input
                     type="text" value={item.name} onChange={(e) => updateItem(item.id, 'name', e.target.value)}
                     placeholder="e.g. Total Knee Replacement Surgery"
-                    className="w-full px-0 py-1 bg-transparent border-b border-slate-200 text-sm font-bold text-slate-800 focus:border-teal-500 outline-none transition-colors"
+                    className="w-full px-3 py-2 bg-slate-50 border border-transparent rounded-lg text-sm font-bold text-slate-800 placeholder:text-slate-300 hover:bg-slate-100/70 focus:bg-white focus:border-teal-500 focus:ring-4 focus:ring-teal-500/10 outline-none transition-all"
                   />
                 </div>
-                <div className="w-24">
-                  <label className="block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">Qty</label>
-                  <input 
+                <div className="sm:w-24">
+                  <label className="block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5">Qty</label>
+                  <input
                     type="number" min="1" value={item.qty} onChange={(e) => updateItem(item.id, 'qty', parseInt(e.target.value) || 1)}
-                    className="w-full px-0 py-1 bg-transparent border-b border-slate-200 text-sm font-bold text-slate-800 focus:border-teal-500 outline-none transition-colors"
+                    className="w-full px-3 py-2 bg-slate-50 border border-transparent rounded-lg text-sm font-bold text-slate-800 hover:bg-slate-100/70 focus:bg-white focus:border-teal-500 focus:ring-4 focus:ring-teal-500/10 outline-none transition-all"
                   />
                 </div>
-                <div className="w-32">
-                  <label className="block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">Unit Price</label>
-                  <div className="flex items-center border-b border-slate-200 focus-within:border-teal-500 transition-colors">
-                    <span className="text-slate-400 text-sm font-bold py-1 mr-1">{CURRENCY_SYMBOLS[currency] || currency}</span>
-                    <input 
+                <div className="sm:w-36">
+                  <label className="block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5">Unit Price</label>
+                  <div className="flex items-center px-3 bg-slate-50 border border-transparent rounded-lg hover:bg-slate-100/70 focus-within:bg-white focus-within:border-teal-500 focus-within:ring-4 focus-within:ring-teal-500/10 transition-all">
+                    <span className="text-slate-400 text-sm font-bold mr-1.5">{currencySymbol}</span>
+                    <input
                       type="number" min="0" value={item.price} onChange={(e) => updateItem(item.id, 'price', parseFloat(e.target.value) || 0)}
-                      className="w-full px-0 py-1 bg-transparent text-sm font-bold text-slate-800 outline-none"
+                      className="w-full py-2 bg-transparent text-sm font-bold text-slate-800 outline-none"
                     />
                   </div>
                 </div>
-                <div className="w-32 flex flex-col justify-end pb-1">
-                  <span className="text-sm font-black text-slate-800 text-right">
-                    {CURRENCY_SYMBOLS[currency] || currency} {(item.price * item.qty).toLocaleString()}
-                  </span>
+                <div className="sm:w-32 sm:text-right pb-2">
+                  <span className="block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5 sm:text-right">Amount</span>
+                  <span className="text-base font-black text-slate-800">{currencySymbol} {(item.price * item.qty).toLocaleString()}</span>
                 </div>
-                <div className="flex flex-col justify-end pb-1">
-                  <button onClick={() => removeItem(item.id)} className="text-slate-300 hover:text-red-500 transition-colors">
+                <div className="pb-1.5">
+                  <button onClick={() => removeItem(item.id)} aria-label="Remove line item" className="p-2 rounded-lg text-slate-300 hover:text-red-500 hover:bg-red-50 transition-colors">
                     <Trash2 size={18} />
                   </button>
                 </div>
@@ -923,21 +1027,21 @@ const QuotationBuilder: React.FC<QuotationBuilderProps> = ({ quotationId, onBack
             ))}
           </div>
 
-          <div className="mt-8 border-t border-slate-100 pt-6 flex justify-end">
-            <div className="w-64 space-y-3">
-              <div className="flex justify-between text-sm font-medium text-slate-500">
-                <span>Subtotal</span>
-                <span>{CURRENCY_SYMBOLS[currency] || currency} {totalAmount.toLocaleString()}</span>
+          <div className="mt-8 flex justify-end">
+            <div className="w-full sm:w-80 rounded-3xl border border-slate-200 bg-gradient-to-br from-slate-50 to-white shadow-sm overflow-hidden">
+              <div className="p-5 space-y-3">
+                <div className="flex justify-between text-sm font-semibold text-slate-500">
+                  <span>Subtotal</span>
+                  <span>{currencySymbol} {totalAmount.toLocaleString()}</span>
+                </div>
+                <div className="flex justify-between text-sm font-semibold text-slate-500">
+                  <span>Tax & Fees (0%)</span>
+                  <span>{currencySymbol} 0.00</span>
+                </div>
               </div>
-              <div className="flex justify-between text-sm font-medium text-slate-500">
-                <span>Tax & Fees (0%)</span>
-                <span>{CURRENCY_SYMBOLS[currency] || currency} 0.00</span>
-              </div>
-              <div className="flex justify-between items-center pt-3 border-t border-slate-100">
-                <span className="text-base font-black text-slate-800">Total Amount</span>
-                <span className="text-2xl font-black text-teal-600">
-                  {CURRENCY_SYMBOLS[currency] || currency} {totalAmount.toLocaleString()}
-                </span>
+              <div className="px-5 py-4 bg-gradient-to-r from-teal-600 to-cyan-700 text-white flex justify-between items-center">
+                <span className="text-sm font-extrabold uppercase tracking-wider">Total Amount</span>
+                <span className="text-2xl font-black">{currencySymbol} {totalAmount.toLocaleString()}</span>
               </div>
             </div>
           </div>
@@ -995,8 +1099,8 @@ const QuotationBuilder: React.FC<QuotationBuilderProps> = ({ quotationId, onBack
                     Quotation Preview
                   </div>
                   <div style={{ fontSize: '12px', color: '#6366f1', fontWeight: 600, marginTop: '2px' }}>
-                    {leads.find(l => l.id === leadId)?.name
-                      ? `For: ${leads.find(l => l.id === leadId)?.name}`
+                    {findLead(leadId)?.name
+                      ? `For: ${findLead(leadId)?.name}`
                       : 'No patient selected'}
                     {' · '}{CURRENCY_SYMBOLS[currency] || currency} {totalAmount.toLocaleString()} total
                   </div>

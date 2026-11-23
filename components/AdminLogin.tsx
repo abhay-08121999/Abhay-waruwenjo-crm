@@ -80,8 +80,8 @@ const ParticleCanvas: React.FC = () => {
           if (dist < 120) {
             ctx.beginPath();
 
-            ctx.strokeStyle = `rgba(20, 184, 166, ${
-              0.12 * (1 - dist / 120)
+            ctx.strokeStyle = `rgba(255, 255, 255, ${
+              0.28 * (1 - dist / 120)
             })`;
 
             ctx.lineWidth = 0.5;
@@ -113,7 +113,7 @@ const ParticleCanvas: React.FC = () => {
           Math.PI * 2,
         );
 
-        ctx.fillStyle = `rgba(20, 184, 166, ${particle.alpha})`;
+        ctx.fillStyle = `rgba(255, 255, 255, ${particle.alpha + 0.15})`;
 
         ctx.fill();
 
@@ -167,21 +167,21 @@ const StatCard: React.FC<{
   delay: string;
 }> = ({ icon, value, label, delay }) => (
   <div
-    className="flex items-center gap-3 bg-white/5 border border-white/10 rounded-2xl p-4 backdrop-blur-sm"
+    className="stat-card flex items-center gap-3 rounded-2xl p-4"
     style={{
       animation: `slideInLeft 0.6s ease-out ${delay} both`,
     }}
   >
-    <div className="w-10 h-10 rounded-xl bg-teal-500/20 border border-teal-500/30 flex items-center justify-center text-teal-400 flex-shrink-0">
+    <div className="w-11 h-11 rounded-xl bg-white/20 border border-white/30 flex items-center justify-center text-white flex-shrink-0 shadow-inner">
       {icon}
     </div>
 
     <div>
-      <p className="text-white font-bold text-lg leading-none">
+      <p className="text-white font-extrabold text-xl leading-none">
         {value}
       </p>
 
-      <p className="text-white/50 text-xs font-medium mt-0.5">
+      <p className="text-white/85 text-xs font-semibold mt-1">
         {label}
       </p>
     </div>
@@ -526,17 +526,17 @@ const AdminLogin: React.FC<AdminLoginProps> = ({
 
   if (checkingSession) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-[#030712]">
+      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-50 via-white to-teal-50">
         <div className="flex flex-col items-center gap-4">
           <div className="relative w-16 h-16">
-            <div className="absolute inset-0 rounded-full border-2 border-teal-500/20 animate-ping" />
+            <div className="absolute inset-0 rounded-full border-2 border-teal-400/40 animate-ping" />
 
-            <div className="w-16 h-16 rounded-full bg-teal-500/10 border border-teal-500/30 flex items-center justify-center">
-              <Activity className="w-7 h-7 text-teal-400 animate-pulse" />
+            <div className="w-16 h-16 rounded-full bg-gradient-to-br from-teal-500 to-cyan-600 shadow-lg shadow-teal-500/30 flex items-center justify-center">
+              <Activity className="w-7 h-7 text-white animate-pulse" />
             </div>
           </div>
 
-          <p className="text-white/60 text-sm font-medium tracking-wide">
+          <p className="text-slate-500 text-sm font-semibold tracking-wide">
             Verifying session...
           </p>
         </div>
@@ -549,168 +549,117 @@ const AdminLogin: React.FC<AdminLoginProps> = ({
   /* ------------------------------------------------------------------------ */
 
   return (
-    <div className="min-h-screen bg-[#030712] flex overflow-hidden relative">
+    <div className="min-h-screen bg-slate-50 flex overflow-hidden relative">
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Figtree:wght@300;400;500;600;700;800&display=swap');
 
-        * {
-          font-family: 'Figtree', system-ui, sans-serif;
-        }
+        * { font-family: 'Figtree', system-ui, sans-serif; }
 
-        @keyframes slideInLeft {
-          from {
-            opacity: 0;
-            transform: translateX(-24px);
-          }
+        @keyframes slideInLeft { from { opacity: 0; transform: translateX(-24px); } to { opacity: 1; transform: translateX(0); } }
+        @keyframes slideInRight { from { opacity: 0; transform: translateX(24px); } to { opacity: 1; transform: translateX(0); } }
+        @keyframes fadeInUp { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes shake { 0%, 100% { transform: translateX(0); } 20%, 60% { transform: translateX(-6px); } 40%, 80% { transform: translateX(6px); } }
+        @keyframes float { 0%, 100% { transform: translateY(0px); } 50% { transform: translateY(-8px); } }
+        @keyframes rotate-slow { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+        @keyframes gradient-flow { 0% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } 100% { background-position: 0% 50%; } }
 
-          to {
-            opacity: 1;
-            transform: translateX(0);
-          }
-        }
+        .error-shake { animation: shake 0.4s ease-in-out; }
+        .float-anim { animation: float 4s ease-in-out infinite; }
+        .rotate-slow { animation: rotate-slow 40s linear infinite; }
 
-        @keyframes slideInRight {
-          from {
-            opacity: 0;
-            transform: translateX(24px);
-          }
-
-          to {
-            opacity: 1;
-            transform: translateX(0);
-          }
-        }
-
-        @keyframes fadeInUp {
-          from {
-            opacity: 0;
-            transform: translateY(16px);
-          }
-
-          to {
-            opacity: 1;
-            transform: translateY(0);
-          }
-        }
-
-        @keyframes shake {
-          0%,
-          100% {
-            transform: translateX(0);
-          }
-
-          20%,
-          60% {
-            transform: translateX(-6px);
-          }
-
-          40%,
-          80% {
-            transform: translateX(6px);
-          }
-        }
-
-        @keyframes float {
-          0%,
-          100% {
-            transform: translateY(0px);
-          }
-
-          50% {
-            transform: translateY(-12px);
-          }
-        }
-
-        @keyframes rotate-slow {
-          from {
-            transform: rotate(0deg);
-          }
-
-          to {
-            transform: rotate(360deg);
-          }
-        }
-
-        .error-shake {
-          animation: shake 0.4s ease-in-out;
-        }
-
-        .float-anim {
-          animation: float 4s ease-in-out infinite;
-        }
-
-        .rotate-slow {
-          animation: rotate-slow 20s linear infinite;
-        }
-
-        .input-glow:focus-within {
-          box-shadow:
-            0 0 0 3px rgba(20, 184, 166, 0.15),
-            0 0 24px rgba(20, 184, 166, 0.08);
-        }
-
-        .login-btn {
+        /* Bright brand panel */
+        .left-panel-bg {
           background:
-            linear-gradient(
-              135deg,
-              #0d9488 0%,
-              #0891b2 50%,
-              #0e7490 100%
-            );
-
-          background-size: 200% 200%;
-          transition: all 0.3s ease;
+            radial-gradient(ellipse at 15% 10%, rgba(255, 255, 255, 0.22) 0%, transparent 45%),
+            radial-gradient(ellipse at 85% 90%, rgba(99, 102, 241, 0.45) 0%, transparent 55%),
+            linear-gradient(135deg, #0d9488 0%, #0891b2 48%, #2563eb 100%);
+          background-size: 140% 140%;
+          animation: gradient-flow 18s ease infinite;
         }
 
-        .login-btn:hover:not(:disabled) {
-          background-position: right center;
-
-          box-shadow:
-            0 0 32px rgba(20, 184, 166, 0.35),
-            0 4px 20px rgba(8, 145, 178, 0.3);
-
-          transform: translateY(-1px);
-        }
-
-        .login-btn:active:not(:disabled) {
-          transform: translateY(0);
-        }
-
-        .login-btn:disabled {
+        .login-rings {
+          right: -180px;
+          bottom: -180px;
+          width: 620px;
+          height: 620px;
           opacity: 0.7;
-          cursor: not-allowed;
+          -webkit-mask-image: radial-gradient(circle at center, #000 30%, transparent 72%);
+          mask-image: radial-gradient(circle at center, #000 30%, transparent 72%);
         }
 
-        .card-glass {
-          background: rgba(255, 255, 255, 0.03);
-          border: 1px solid rgba(255, 255, 255, 0.08);
-          backdrop-filter: blur(24px);
-          -webkit-backdrop-filter: blur(24px);
+        .stat-card {
+          background: linear-gradient(145deg, rgba(255, 255, 255, 0.22), rgba(255, 255, 255, 0.08));
+          border: 1px solid rgba(255, 255, 255, 0.28);
+          box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.3), 0 10px 30px rgba(7, 89, 133, 0.25);
+          backdrop-filter: blur(10px);
+          -webkit-backdrop-filter: blur(10px);
+          transition: transform 0.25s ease, box-shadow 0.25s ease, border-color 0.25s ease;
+        }
+        .stat-card:hover {
+          transform: translateY(-4px);
+          border-color: rgba(255, 255, 255, 0.55);
+          box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.4), 0 18px 38px rgba(7, 89, 133, 0.35);
         }
 
         .trust-badge {
-          background: rgba(20, 184, 166, 0.08);
-          border: 1px solid rgba(20, 184, 166, 0.2);
+          background: rgba(255, 255, 255, 0.16);
+          border: 1px solid rgba(255, 255, 255, 0.35);
+          transition: background 0.2s ease, transform 0.2s ease;
+        }
+        .trust-badge:hover { background: rgba(255, 255, 255, 0.28); transform: translateY(-1px); }
+
+        /* Light, clean sign-in card */
+        .card-glass {
+          position: relative;
+          background: #ffffff;
+          border: 1px solid #e2e8f0;
+          box-shadow: 0 30px 70px -20px rgba(8, 145, 178, 0.35), 0 8px 24px rgba(15, 23, 42, 0.06);
+        }
+        .card-glass::before {
+          content: '';
+          position: absolute;
+          top: 0; left: 0; right: 0;
+          height: 4px;
+          border-radius: 24px 24px 0 0;
+          background: linear-gradient(90deg, #14b8a6, #06b6d4, #6366f1);
         }
 
-        .left-panel-bg {
-          background:
-            radial-gradient(
-              ellipse at 30% 50%,
-              rgba(20, 184, 166, 0.12) 0%,
-              transparent 60%
-            ),
-            radial-gradient(
-              ellipse at 80% 20%,
-              rgba(8, 145, 178, 0.08) 0%,
-              transparent 50%
-            ),
-            linear-gradient(
-              160deg,
-              #0a1628 0%,
-              #030712 60%,
-              #061020 100%
-            );
+        .input-glow { transition: border-color 0.2s ease, background 0.2s ease, box-shadow 0.2s ease; }
+        .input-glow:hover { border-color: #94a3b8; }
+        .input-glow:focus-within {
+          box-shadow: 0 0 0 4px rgba(20, 184, 166, 0.16);
+        }
+
+        .login-btn {
+          position: relative;
+          overflow: hidden;
+          background: linear-gradient(135deg, #0d9488 0%, #0891b2 50%, #2563eb 100%);
+          background-size: 200% 200%;
+          box-shadow: 0 12px 28px rgba(8, 145, 178, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.25);
+          transition: all 0.3s ease;
+        }
+        .login-btn::after {
+          content: '';
+          position: absolute;
+          top: 0; left: -120%;
+          width: 60%; height: 100%;
+          background: linear-gradient(100deg, transparent, rgba(255, 255, 255, 0.4), transparent);
+          transform: skewX(-20deg);
+          transition: left 0.7s ease;
+        }
+        .login-btn:hover:not(:disabled) {
+          background-position: right center;
+          box-shadow: 0 16px 36px rgba(8, 145, 178, 0.45);
+          transform: translateY(-2px);
+        }
+        .login-btn:hover:not(:disabled)::after { left: 140%; }
+        .login-btn:active:not(:disabled) { transform: translateY(0); }
+        .login-btn:focus-visible { outline: none; box-shadow: 0 0 0 4px rgba(20, 184, 166, 0.4), 0 12px 28px rgba(8, 145, 178, 0.35); }
+        .login-btn:disabled { opacity: 0.7; cursor: not-allowed; }
+
+        @media (prefers-reduced-motion: reduce) {
+          .float-anim, .rotate-slow, .left-panel-bg { animation: none; }
+          .login-btn::after { display: none; }
         }
       `}</style>
 
@@ -722,16 +671,16 @@ const AdminLogin: React.FC<AdminLoginProps> = ({
         <ParticleCanvas />
 
         {/* Decorative rings */}
-        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none select-none">
-          <div className="w-[500px] h-[500px] rounded-full border border-teal-500/5 rotate-slow opacity-60" />
+        <div className="login-rings absolute pointer-events-none select-none">
+          <div className="w-full h-full rounded-full border border-white/40 rotate-slow" />
 
-          <div className="absolute inset-[60px] rounded-full border border-teal-500/8" />
+          <div className="absolute inset-[70px] rounded-full border border-white/30" />
 
-          <div className="absolute inset-[120px] rounded-full border border-teal-400/6" />
+          <div className="absolute inset-[140px] rounded-full border border-white/20" />
         </div>
 
         {/* Glow orb */}
-        <div className="absolute top-1/3 left-1/3 w-72 h-72 bg-teal-500/10 rounded-full blur-[80px] pointer-events-none" />
+        <div className="absolute top-1/3 left-1/3 w-80 h-80 bg-white/25 rounded-full blur-[90px] pointer-events-none" />
 
         {/* Top: Logo */}
         <div
@@ -741,7 +690,7 @@ const AdminLogin: React.FC<AdminLoginProps> = ({
           }}
         >
           <div className="flex items-center gap-3">
-            <div className="w-12 h-12 rounded-2xl overflow-hidden bg-white/5 border border-white/10 flex items-center justify-center">
+            <div className="w-12 h-12 rounded-2xl overflow-hidden bg-white border border-white/60 shadow-lg shadow-sky-900/20 flex items-center justify-center">
               <img
                 src="/logo.png"
                 alt="WaruWenJo"
@@ -755,11 +704,11 @@ const AdminLogin: React.FC<AdminLoginProps> = ({
             </div>
 
             <div>
-              <p className="text-white font-bold text-lg leading-none tracking-tight">
+              <p className="text-white font-extrabold text-lg leading-none tracking-tight">
                 WaruWenJo
               </p>
 
-              <p className="text-teal-400 text-xs font-semibold mt-0.5 tracking-wider uppercase">
+              <p className="text-cyan-100 text-xs font-semibold mt-0.5 tracking-wider uppercase">
                 Admin Portal
               </p>
             </div>
@@ -774,8 +723,8 @@ const AdminLogin: React.FC<AdminLoginProps> = ({
               'slideInLeft 0.6s ease-out 0.2s both',
           }}
         >
-          <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-teal-500/10 border border-teal-500/20 text-teal-400 text-xs font-bold uppercase tracking-widest mb-6">
-            <span className="w-1.5 h-1.5 rounded-full bg-teal-400 animate-pulse" />
+          <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-white/20 border border-white/40 text-white text-xs font-bold uppercase tracking-widest mb-6 backdrop-blur">
+            <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse" />
             Medical Field Force CRM
           </div>
 
@@ -787,14 +736,14 @@ const AdminLogin: React.FC<AdminLoginProps> = ({
               className="text-transparent bg-clip-text"
               style={{
                 backgroundImage:
-                  'linear-gradient(90deg, #2dd4bf, #38bdf8)',
+                  'linear-gradient(90deg, #ffffff, #a5f3fc, #fef9c3)',
               }}
             >
               Medical Network
             </span>
           </h1>
 
-          <p className="text-white/50 text-base font-medium leading-relaxed max-w-sm">
+          <p className="text-white/90 text-base font-medium leading-relaxed max-w-sm">
             Streamline patient journeys, hospital partnerships,
             and specialist operations from one secure admin hub.
           </p>
@@ -847,7 +796,7 @@ const AdminLogin: React.FC<AdminLoginProps> = ({
           ].map((badge) => (
             <span
               key={badge}
-              className="trust-badge text-teal-300 text-[10px] font-bold uppercase tracking-widest px-3 py-1.5 rounded-full"
+              className="trust-badge text-white text-[10px] font-bold uppercase tracking-widest px-3.5 py-1.5 rounded-full"
             >
               {badge}
             </span>
@@ -863,12 +812,12 @@ const AdminLogin: React.FC<AdminLoginProps> = ({
         className="flex-1 flex items-center justify-center p-6 sm:p-10 relative"
         style={{
           background:
-            'radial-gradient(ellipse at 60% 50%, rgba(20,184,166,0.05) 0%, transparent 60%), #030712',
+            'radial-gradient(ellipse at 70% 15%, rgba(20,184,166,0.14) 0%, transparent 55%), radial-gradient(ellipse at 20% 90%, rgba(99,102,241,0.10) 0%, transparent 55%), linear-gradient(180deg, #f8fafc 0%, #eef7f8 100%)',
         }}
       >
         {/* Mobile logo */}
         <div className="absolute top-6 left-6 lg:hidden flex items-center gap-2.5">
-          <div className="w-8 h-8 rounded-xl overflow-hidden bg-white/5 border border-white/10 flex items-center justify-center">
+          <div className="w-8 h-8 rounded-xl overflow-hidden bg-white border border-slate-200 shadow-sm flex items-center justify-center">
             <img
               src="/logo.png"
               alt="WaruWenJo"
@@ -881,7 +830,7 @@ const AdminLogin: React.FC<AdminLoginProps> = ({
             />
           </div>
 
-          <span className="text-white font-bold text-sm">
+          <span className="text-slate-800 font-bold text-sm">
             WaruWenJo
           </span>
         </div>
@@ -901,34 +850,34 @@ const AdminLogin: React.FC<AdminLoginProps> = ({
                 'fadeInUp 0.5s ease-out 0.3s both',
             }}
           >
-            <div className="w-14 h-14 rounded-2xl bg-teal-500/10 border border-teal-500/20 flex items-center justify-center mb-5 float-anim">
-              <Lock className="w-7 h-7 text-teal-400" />
+            <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-teal-500 to-cyan-600 shadow-lg shadow-teal-500/30 flex items-center justify-center mb-5 float-anim">
+              <Lock className="w-7 h-7 text-white" />
             </div>
 
-            <h2 className="text-2xl font-extrabold text-white tracking-tight">
+            <h2 className="text-3xl font-extrabold text-slate-900 tracking-tight">
               Secure CRM Access
             </h2>
 
-            <p className="text-white/40 text-sm font-medium mt-1.5">
+            <p className="text-slate-500 text-sm font-medium mt-1.5">
               Sign in with your CRM credentials
             </p>
           </div>
 
           {/* Error */}
           {error && (
-            <div className="mb-5 p-4 rounded-2xl bg-red-500/10 border border-red-500/20 flex items-start gap-3 error-shake">
-              <div className="w-5 h-5 rounded-full bg-red-500/20 flex items-center justify-center flex-shrink-0 mt-0.5">
-                <span className="w-2 h-2 rounded-full bg-red-400 block" />
+            <div className="mb-5 p-4 rounded-2xl bg-red-50 border border-red-200 flex items-start gap-3 error-shake">
+              <div className="w-5 h-5 rounded-full bg-red-100 flex items-center justify-center flex-shrink-0 mt-0.5">
+                <span className="w-2 h-2 rounded-full bg-red-500 block" />
               </div>
 
-              <p className="text-red-400 text-sm font-medium leading-snug">
+              <p className="text-red-600 text-sm font-semibold leading-snug">
                 {error}
               </p>
             </div>
           )}
 
           {/* Form Card */}
-          <div className="card-glass rounded-3xl p-6 space-y-5">
+          <div className="card-glass rounded-3xl p-7 space-y-5">
             <form
               onSubmit={handleLogin}
               className="space-y-5"
@@ -937,7 +886,7 @@ const AdminLogin: React.FC<AdminLoginProps> = ({
               <div>
                 <label
                   htmlFor="adminEmail"
-                  className="block text-xs font-bold text-white/60 uppercase tracking-widest mb-2"
+                  className="block text-xs font-bold text-slate-600 uppercase tracking-widest mb-2"
                 >
                   Email / Login ID
                 </label>
@@ -945,16 +894,16 @@ const AdminLogin: React.FC<AdminLoginProps> = ({
                 <div
                   className={`input-glow relative flex items-center rounded-2xl border transition-all duration-200 ${
                     isFocused === 'email'
-                      ? 'border-teal-500/50 bg-teal-500/5'
-                      : 'border-white/10 bg-white/3'
+                      ? 'border-teal-500 bg-teal-50/50'
+                      : 'border-slate-200 bg-slate-50'
                   }`}
                 >
                   <Mail
                     size={16}
                     className={`absolute left-4 transition-colors duration-200 ${
                       isFocused === 'email'
-                        ? 'text-teal-400'
-                        : 'text-white/30'
+                        ? 'text-teal-600'
+                        : 'text-slate-400'
                     }`}
                   />
 
@@ -977,7 +926,7 @@ const AdminLogin: React.FC<AdminLoginProps> = ({
                     }
                     required
                     autoComplete="email"
-                    className="w-full bg-transparent pl-11 pr-4 py-3.5 text-white placeholder:text-white/25 text-sm font-medium outline-none rounded-2xl"
+                    className="w-full bg-transparent pl-11 pr-4 py-3.5 text-slate-900 placeholder:text-slate-400 text-sm font-semibold outline-none rounded-2xl"
                   />
                 </div>
               </div>
@@ -986,7 +935,7 @@ const AdminLogin: React.FC<AdminLoginProps> = ({
               <div>
                 <label
                   htmlFor="adminPassword"
-                  className="block text-xs font-bold text-white/60 uppercase tracking-widest mb-2"
+                  className="block text-xs font-bold text-slate-600 uppercase tracking-widest mb-2"
                 >
                   Password
                 </label>
@@ -994,16 +943,16 @@ const AdminLogin: React.FC<AdminLoginProps> = ({
                 <div
                   className={`input-glow relative flex items-center rounded-2xl border transition-all duration-200 ${
                     isFocused === 'password'
-                      ? 'border-teal-500/50 bg-teal-500/5'
-                      : 'border-white/10 bg-white/3'
+                      ? 'border-teal-500 bg-teal-50/50'
+                      : 'border-slate-200 bg-slate-50'
                   }`}
                 >
                   <Lock
                     size={16}
                     className={`absolute left-4 transition-colors duration-200 ${
                       isFocused === 'password'
-                        ? 'text-teal-400'
-                        : 'text-white/30'
+                        ? 'text-teal-600'
+                        : 'text-slate-400'
                     }`}
                   />
 
@@ -1030,7 +979,7 @@ const AdminLogin: React.FC<AdminLoginProps> = ({
                     }
                     required
                     autoComplete="current-password"
-                    className="w-full bg-transparent pl-11 pr-12 py-3.5 text-white placeholder:text-white/25 text-sm font-medium outline-none rounded-2xl"
+                    className="w-full bg-transparent pl-11 pr-12 py-3.5 text-slate-900 placeholder:text-slate-400 text-sm font-semibold outline-none rounded-2xl"
                   />
 
                   <button
@@ -1040,7 +989,7 @@ const AdminLogin: React.FC<AdminLoginProps> = ({
                         !showPassword,
                       )
                     }
-                    className="absolute right-3.5 p-1.5 text-white/30 hover:text-white/80 transition-colors duration-200 cursor-pointer rounded-lg"
+                    className="absolute right-3.5 p-1.5 text-slate-400 hover:text-teal-600 transition-colors duration-200 cursor-pointer rounded-lg"
                     aria-label={
                       showPassword
                         ? 'Hide password'
@@ -1090,17 +1039,17 @@ const AdminLogin: React.FC<AdminLoginProps> = ({
           <div className="mt-5 flex items-center gap-2 justify-center">
             <Shield
               size={12}
-              className="text-teal-500/60"
+              className="text-teal-600"
             />
 
-            <p className="text-white/30 text-xs font-medium text-center">
+            <p className="text-slate-500 text-xs font-medium text-center">
               All sessions are encrypted and access
               attempts are logged
             </p>
           </div>
 
           {/* Footer */}
-          <p className="text-white/20 text-center text-xs font-medium mt-8">
+          <p className="text-slate-400 text-center text-xs font-medium mt-8">
             © {new Date().getFullYear()} WaruWenJo Medical
             Tourism Platform
           </p>

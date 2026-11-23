@@ -242,6 +242,8 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   const [isViewOnlyStage, setIsViewOnlyStage] = useState(false);
   // Pop-up shown when the in-house doctor finalizes Stage 5 and the lead is handed to the BDM for Stage 6.
   const [showStage5Complete, setShowStage5Complete] = useState(false);
+  // Pop-up shown to the BDM after they progress a lead from Stage 3 to Stage 4 (handover to the in-house doctor).
+  const [showStage3Handover, setShowStage3Handover] = useState(false);
   const isStageReadOnly = !canWriteStage(activeWorkflowStage) || isViewOnlyStage;
   const detailScrollRef = useRef<HTMLDivElement>(null);
   // Opens a lead from a card or row. Clears the previous lead first, so the detail pane always
@@ -280,6 +282,8 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   const [userDirectory, setUserDirectory] = useState<Record<string, string>>({});
   const roleKeys: string[] = (roles as any[]).map((r) => (typeof r === 'string' ? r : r?.key));
   const canAssignBdm = roleKeys.includes('admin') || roleKeys.includes('super_admin');
+  // Only the BDM (in Stage 3) can assign the in-house doctor; everyone else sees the name read-only.
+  const canAssignInHouseDoctor = isBdmUser;
   const [vilSubmission, setVilSubmission] = useState<any>(null);
   const [vilLoadError, setVilLoadError] = useState('');
   const [showSpamReasonPicker, setShowSpamReasonPicker] = useState(false);
@@ -719,6 +723,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
       setActiveWorkflowStage(stage);
       setIsViewOnlyStage(false);
       toast.success(stage === 9 ? 'Lead Dropped & Archived' : `Entered Stage: ${targetStage?.name}`);
+      if (isBdmUser && stage === 4 && activeWorkflowStage === 3) setShowStage3Handover(true);
       
       // Log Activity
       await logAdminActivity(
@@ -2028,6 +2033,10 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
   };
 
   const assignToInHouseDoctorInbox = async () => {
+    if (!canAssignInHouseDoctor) {
+      toast.error('Only the BDM can assign the in-house doctor.');
+      return;
+    }
     if (!selectedLead || !selectedInHouseDoctor) {
       toast.error('Select an in-house doctor first.');
       return;
@@ -2859,20 +2868,20 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
 
   const getUrgencyStyles = (urgency: string) => {
     switch (urgency) {
-      case 'Emergency': return 'bg-rose-500 text-white border-rose-400';
-      case 'Urgent': return 'bg-amber-500 text-white border-amber-400';
-      case 'Standard': return 'bg-teal-500 text-white border-teal-400';
-      default: return 'bg-slate-400 text-white border-slate-300';
+      case 'Emergency': return 'bg-gradient-to-r from-rose-500 to-pink-500 text-white border-rose-300 shadow-lg shadow-rose-500/40';
+      case 'Urgent': return 'bg-gradient-to-r from-amber-400 to-orange-500 text-white border-amber-300 shadow-lg shadow-amber-500/40';
+      case 'Standard': return 'bg-gradient-to-r from-teal-500 to-cyan-500 text-white border-teal-300 shadow-lg shadow-teal-500/30';
+      default: return 'bg-gradient-to-r from-slate-400 to-slate-500 text-white border-slate-300 shadow-md';
     }
   };
 
   const getStatusColor = (status: string) => {
     switch (status) {
-      case 'new': return 'bg-sky-50 text-sky-600 border-sky-100';
-      case 'contacted': return 'bg-slate-50 text-slate-600 border-slate-100';
-      case 'qualified': return 'bg-amber-50 text-amber-600 border-amber-100';
-      case 'won': return 'bg-emerald-50 text-emerald-600 border-emerald-100';
-      case 'lost': return 'bg-rose-50 text-rose-600 border-rose-100';
+      case 'new': return 'bg-sky-100 text-sky-700 border-sky-300';
+      case 'contacted': return 'bg-violet-100 text-violet-700 border-violet-300';
+      case 'qualified': return 'bg-amber-100 text-amber-700 border-amber-300';
+      case 'won': return 'bg-emerald-100 text-emerald-700 border-emerald-300';
+      case 'lost': return 'bg-rose-100 text-rose-700 border-rose-300';
       default: return 'bg-slate-100 text-slate-500';
     }
   };
@@ -3073,40 +3082,41 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
 
   const LeadCard: React.FC<{ lead: Lead }> = ({ lead }) => (
     <div 
-      className="bg-white p-5 rounded-3xl border border-slate-200/80 shadow-sm hover:border-teal-500 hover:-translate-y-1 hover:shadow-xl hover:shadow-teal-500/10 transition-all group relative overflow-visible cursor-pointer mb-4"
+      className="pl-card bg-white p-6 pt-7 rounded-3xl border border-slate-200/80 shadow-md hover:border-teal-400 hover:-translate-y-1.5 hover:shadow-2xl hover:shadow-teal-500/20 transition-all duration-300 group relative overflow-visible cursor-pointer mb-4"
       onClick={() => openLeadDetail(lead)}
     >
-      <div className={`absolute -top-3 right-8 px-4 py-1.5 rounded-full text-[9px] font-black uppercase tracking-widest border-2 z-10 ${getUrgencyStyles(lead.urgency || 'Standard')}`}>
+      <span className={`absolute left-0 top-6 bottom-6 w-1.5 rounded-r-full ${lead.urgency === 'Emergency' ? 'bg-gradient-to-b from-rose-500 to-pink-500' : lead.urgency === 'Urgent' ? 'bg-gradient-to-b from-amber-400 to-orange-500' : 'bg-gradient-to-b from-teal-400 to-cyan-500'}`} />
+      <div className={`absolute -top-3.5 right-8 px-4 py-1.5 rounded-full text-[10px] font-black uppercase tracking-widest border-2 z-10 ${lead.urgency === 'Emergency' ? 'pl-pulse' : ''} ${getUrgencyStyles(lead.urgency || 'Standard')}`}>
         {lead.urgency || 'Standard'}
       </div>
 
-      <div className="flex items-start justify-between mb-4">
-        <div className="flex items-center gap-3">
-          <div className="w-12 h-12 bg-teal-50 rounded-2xl flex items-center justify-center text-teal-600 border border-teal-100 shadow-inner group-hover:bg-teal-600 group-hover:text-white transition-all">
+      <div className="flex items-start justify-between mb-5">
+        <div className="flex items-center gap-4">
+          <div className="pl-avatar w-14 h-14 bg-gradient-to-br from-teal-400 to-cyan-600 rounded-2xl flex items-center justify-center text-white text-xl font-black uppercase shadow-lg shadow-teal-500/30 group-hover:from-indigo-500 group-hover:to-violet-600 group-hover:shadow-indigo-500/30 transition-all">
             {lead.name.charAt(0)}
           </div>
           <div>
-            <h4 className="text-lg font-black text-slate-900 leading-none group-hover:text-teal-600 transition-colors uppercase truncate max-w-[180px]">{lead.name}</h4>
-            <p className="text-[10px] font-black text-indigo-500 uppercase tracking-widest mt-1.5 flex items-center gap-1"><Globe size={10} /> {lead.country || 'International'}</p>
+            <h4 className="text-xl font-black text-slate-900 leading-tight group-hover:text-teal-600 transition-colors uppercase truncate max-w-[190px]">{lead.name}</h4>
+            <p className="text-[11px] font-black text-indigo-600 uppercase tracking-widest mt-1.5 flex items-center gap-1.5"><Globe size={12} /> {lead.country || 'International'}</p>
           </div>
         </div>
       </div>
 
-      <div className="mb-4 bg-slate-50/80 rounded-[1.75rem] p-4 border border-slate-100">
-        <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest leading-none mb-2">Primary Interest</p>
-        <p className="text-[13px] font-bold text-slate-800 leading-snug line-clamp-1">{lead.treatmentInterest || 'Medical Consultation'}</p>
+      <div className="mb-4 bg-gradient-to-br from-teal-50 via-white to-indigo-50 rounded-[1.75rem] p-4 border border-teal-100/80 group-hover:border-teal-200 transition-colors">
+        <p className="text-[11px] font-black text-teal-600 uppercase tracking-widest leading-none mb-2">Primary Interest</p>
+        <p className="text-sm font-extrabold text-slate-800 leading-snug line-clamp-1">{lead.treatmentInterest || 'Medical Consultation'}</p>
       </div>
 
       {lead.workflowState?.callback_due_at && (
-        <div className={`mb-3 text-[9px] font-black uppercase tracking-widest ${new Date(lead.workflowState.callback_due_at) < new Date() ? 'text-rose-600' : 'text-amber-600'}`}>
+        <div className={`mb-3 inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest ${new Date(lead.workflowState.callback_due_at) < new Date() ? 'bg-rose-100 text-rose-700 animate-pulse' : 'bg-amber-100 text-amber-700'}`}>
           {new Date(lead.workflowState.callback_due_at) < new Date() ? 'Callback due' : `Callback ${new Date(lead.workflowState.callback_due_at).toLocaleString()}`}
         </div>
       )}
 
-      <div className="flex items-center justify-between pt-4 border-t border-slate-50 mt-4">
+      <div className="flex items-center justify-between pt-4 border-t border-slate-100 mt-4">
         <div className="flex gap-2">
-          <div className="p-2 bg-slate-50 text-slate-400 rounded-lg hover:text-teal-600 transition-all"><Mail size={14} /></div>
-          <div className="p-2 bg-slate-50 text-slate-400 rounded-lg hover:text-indigo-600 transition-all"><Phone size={14} /></div>
+          <div className="p-2.5 bg-sky-50 text-sky-600 rounded-xl hover:bg-sky-500 hover:text-white hover:scale-110 transition-all"><Mail size={16} /></div>
+          <div className="p-2.5 bg-emerald-50 text-emerald-600 rounded-xl hover:bg-emerald-500 hover:text-white hover:scale-110 transition-all"><Phone size={16} /></div>
         </div>
         <div className="flex items-center gap-2">
           {lead.status === 'lost' && (
@@ -3115,13 +3125,13 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                 e.stopPropagation();
                 handleRestoreLead(lead);
               }}
-              className="p-2 bg-emerald-50 text-emerald-600 rounded-lg hover:bg-emerald-600 hover:text-white transition-all shadow-sm group/restore"
+              className="p-2.5 bg-emerald-50 text-emerald-600 rounded-xl hover:bg-emerald-600 hover:text-white transition-all shadow-sm group/restore"
               title="Restore Lead"
             >
-              <Activity size={14} className="group-hover/restore:animate-pulse" />
+              <Activity size={16} className="group-hover/restore:animate-pulse" />
             </button>
           )}
-          <span className={`text-[9px] font-black px-3 py-1 rounded-full uppercase border ${getStatusColor(lead.status)}`}>
+          <span className={`text-[10px] font-black px-3.5 py-1.5 rounded-full uppercase tracking-wider border ${getStatusColor(lead.status)}`}>
             {lead.status === 'won' ? 'Converted' : lead.status}
           </span>
         </div>
@@ -3134,29 +3144,61 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
     { id: 'contacted', label: 'Follow Up', icon: <Clock size={14} /> },
     { id: 'qualified', label: 'Clinical Triage', icon: <CheckCircle2 size={14} /> }
   ];
+  // Visual theme of each board column (colours only).
+  const COLUMN_THEME: Record<string, { badge: string; lane: string; icon: string }> = {
+    new: { badge: 'bg-gradient-to-r from-sky-500 to-blue-600 shadow-sky-500/40', lane: 'bg-gradient-to-b from-sky-50 via-sky-50/40 to-white border-sky-200', icon: 'bg-sky-100 text-sky-600' },
+    contacted: { badge: 'bg-gradient-to-r from-violet-500 to-fuchsia-500 shadow-violet-500/40', lane: 'bg-gradient-to-b from-violet-50 via-violet-50/40 to-white border-violet-200', icon: 'bg-violet-100 text-violet-600' },
+    qualified: { badge: 'bg-gradient-to-r from-amber-400 to-orange-500 shadow-amber-500/40', lane: 'bg-gradient-to-b from-amber-50 via-amber-50/40 to-white border-amber-200', icon: 'bg-amber-100 text-amber-600' },
+  };
 
   return (
     <>
     {/* Patient Leads had no Toaster of its own, so toasts (e.g. the quotation error) were hidden or lost behind the lead detail pane. */}
     <Toaster richColors closeButton position="top-center" style={{ zIndex: 2147483647 }} toastOptions={{ duration: 6000 }} />
-    <div className="space-y-7 pb-10 animate-in fade-in duration-700">
+    <style>{`
+      @keyframes pl-fade-up { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: translateY(0); } }
+      @keyframes pl-gradient { 0% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } 100% { background-position: 0% 50%; } }
+      @keyframes pl-pulse-ring { 0% { box-shadow: 0 0 0 0 rgba(244, 63, 94, 0.6); } 70% { box-shadow: 0 0 0 10px rgba(244, 63, 94, 0); } 100% { box-shadow: 0 0 0 0 rgba(244, 63, 94, 0); } }
+      @keyframes pl-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-4px); } }
+      @keyframes pl-shine { from { transform: translateX(-130%) skewX(-20deg); } to { transform: translateX(330%) skewX(-20deg); } }
+      .pl-title { background-image: linear-gradient(90deg, #0d9488, #0ea5e9, #8b5cf6, #ec4899, #0d9488); background-size: 300% 100%; -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; color: transparent; animation: pl-gradient 9s ease infinite; }
+      .pl-rise { animation: pl-fade-up 0.6s ease-out backwards; }
+      .pl-stat { position: relative; overflow: hidden; animation: pl-fade-up 0.6s ease-out backwards; transition: transform 0.25s ease, box-shadow 0.25s ease; }
+      .pl-stat:hover { transform: translateY(-5px) scale(1.015); box-shadow: 0 22px 40px -12px rgba(15, 23, 42, 0.35); }
+      .pl-stat::after { content: ''; position: absolute; top: 0; left: 0; width: 35%; height: 100%; background: linear-gradient(100deg, transparent, rgba(255, 255, 255, 0.35), transparent); transform: translateX(-130%) skewX(-20deg); }
+      .pl-stat:hover::after { animation: pl-shine 0.9s ease; }
+      .pl-stat:nth-child(2), .pl-column:nth-child(2) { animation-delay: 0.08s; }
+      .pl-stat:nth-child(3), .pl-column:nth-child(3) { animation-delay: 0.16s; }
+      .pl-stat:nth-child(4), .pl-column:nth-child(4) { animation-delay: 0.24s; }
+      .pl-column { animation: pl-fade-up 0.6s ease-out backwards; }
+      .pl-card:hover .pl-avatar { animation: pl-float 1.3s ease-in-out infinite; }
+      .pl-pulse { animation: pl-pulse-ring 1.8s ease-out infinite; }
+      .pl-cta { background-size: 200% 200%; animation: pl-gradient 6s ease infinite; }
+      @media (prefers-reduced-motion: reduce) {
+        .pl-title, .pl-rise, .pl-stat, .pl-column, .pl-pulse, .pl-cta, .pl-card:hover .pl-avatar { animation: none !important; }
+      }
+    `}</style>
+    <div className="space-y-8 pb-10 animate-in fade-in duration-700">
       <div className="flex flex-col md:flex-row md:items-end justify-between gap-6">
         <div>
-          <p className="text-[10px] font-black uppercase tracking-[0.25em] text-teal-600 mb-2">Patient intake operations</p>
-          <h2 className="text-3xl md:text-4xl font-black text-slate-900 tracking-tight">Patient Ingestion Hub</h2>
-          <p className="text-slate-500 font-medium mt-2 max-w-xl">Triage new enquiries, capture first contact, and move qualified patients through the clinical journey.</p>
+          <p className="flex items-center gap-2.5 text-xs font-black uppercase tracking-[0.25em] text-teal-600 mb-3">
+            <span className="relative flex h-2.5 w-2.5"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-teal-400 opacity-75" /><span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-teal-500" /></span>
+            Patient intake operations
+          </p>
+          <h2 className="pl-title text-4xl md:text-5xl font-black tracking-tight leading-tight pb-1">Patient Ingestion Hub</h2>
+          <p className="text-slate-600 text-base font-medium mt-2 max-w-xl leading-relaxed">Triage new enquiries, capture first contact, and move qualified patients through the clinical journey.</p>
         </div>
         <div className="flex items-center gap-3">
-          <div className="flex bg-slate-100 p-1 rounded-2xl border border-slate-200 shadow-sm">
+          <div className="flex bg-white p-1.5 rounded-2xl border border-slate-200 shadow-md">
             <button 
               onClick={() => setViewMode('BOARD')} 
-              className={`flex items-center gap-2 px-5 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${viewMode === 'BOARD' ? 'bg-white text-teal-600 shadow-lg' : 'text-slate-500 hover:text-slate-700'}`}
+              className={`flex items-center gap-2 px-5 py-3 rounded-xl text-xs font-black uppercase tracking-widest transition-all duration-300 ${viewMode === 'BOARD' ? 'bg-gradient-to-r from-teal-500 to-cyan-500 text-white shadow-lg shadow-teal-500/40 scale-105' : 'text-slate-500 hover:text-teal-600 hover:bg-teal-50'}`}
             >
               <LayoutGrid size={16} /> Board
             </button>
             <button 
               onClick={() => setViewMode('TABLE')} 
-              className={`flex items-center gap-2 px-5 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${viewMode === 'TABLE' ? 'bg-white text-teal-600 shadow-lg' : 'text-slate-500 hover:text-slate-700'}`}
+              className={`flex items-center gap-2 px-5 py-3 rounded-xl text-xs font-black uppercase tracking-widest transition-all duration-300 ${viewMode === 'TABLE' ? 'bg-gradient-to-r from-teal-500 to-cyan-500 text-white shadow-lg shadow-teal-500/40 scale-105' : 'text-slate-500 hover:text-teal-600 hover:bg-teal-50'}`}
             >
               <List size={16} /> Table
             </button>
@@ -3164,7 +3206,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
           <button
             onClick={() => setShowModal(true)}
             disabled={!canWriteStage(1)}
-            className="flex items-center gap-2 px-6 py-3.5 disabled:opacity-40 disabled:cursor-not-allowed bg-slate-900 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest hover:bg-teal-700 shadow-lg transition-all active:scale-95"
+            className="pl-cta flex items-center gap-2 px-7 py-4 disabled:opacity-40 disabled:cursor-not-allowed bg-gradient-to-r from-teal-500 via-cyan-500 to-indigo-500 text-white rounded-2xl text-xs font-black uppercase tracking-widest hover:-translate-y-1 shadow-xl shadow-teal-500/40 hover:shadow-2xl hover:shadow-indigo-500/40 transition-all active:scale-95"
           >
             <Plus size={18} /> New Intake
           </button>
@@ -3172,57 +3214,61 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
       </div>
 
       {/* CRM Patient Leads Dashboard */}
-      <div className="grid grid-cols-2 xl:grid-cols-4 gap-3 mb-1">
-        <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 border-t-4 border-t-blue-500">
-            <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Total Leads</p>
-            <h3 className="text-3xl font-black mt-2 text-slate-800">{leads.length}</h3>
-            <p className="text-[10px] font-bold text-emerald-500 mt-2">↑ 12% vs last month</p>
+      <div className="grid grid-cols-2 xl:grid-cols-4 gap-4 mb-1">
+        <div className="pl-stat p-6 rounded-3xl shadow-lg shadow-blue-500/30 bg-gradient-to-br from-sky-500 via-blue-500 to-blue-700 text-white">
+            <span className="absolute -right-6 -top-6 w-28 h-28 rounded-full bg-white/15" />
+            <p className="relative text-xs font-black text-white/85 uppercase tracking-widest">Total Leads</p>
+            <h3 className="relative text-5xl font-black mt-3 text-white">{leads.length}</h3>
+            <p className="relative text-xs font-bold text-white/90 mt-3">↑ 12% vs last month</p>
         </div>
-        <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 border-t-4 border-t-emerald-500">
-            <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Conversion Rate</p>
-            <h3 className="text-3xl font-black mt-2 text-slate-800">{leads.length ? ((leads.filter(l => l.status === 'won').length / leads.length) * 100).toFixed(1) : 0}%</h3>
-            <p className="text-[10px] font-bold text-emerald-500 mt-2">↑ 3.2% vs last month</p>
+        <div className="pl-stat p-6 rounded-3xl shadow-lg shadow-emerald-500/30 bg-gradient-to-br from-emerald-400 via-emerald-500 to-teal-600 text-white">
+            <span className="absolute -right-6 -top-6 w-28 h-28 rounded-full bg-white/15" />
+            <p className="relative text-xs font-black text-white/85 uppercase tracking-widest">Conversion Rate</p>
+            <h3 className="relative text-5xl font-black mt-3 text-white">{leads.length ? ((leads.filter(l => l.status === 'won').length / leads.length) * 100).toFixed(1) : 0}%</h3>
+            <p className="relative text-xs font-bold text-white/90 mt-3">↑ 3.2% vs last month</p>
         </div>
-        <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 border-t-4 border-t-amber-500">
-            <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Avg Response Time</p>
-            <h3 className="text-3xl font-black mt-2 text-slate-800">14m</h3>
-            <p className="text-[10px] font-bold text-rose-500 mt-2">↓ 2m slower vs last month</p>
+        <div className="pl-stat p-6 rounded-3xl shadow-lg shadow-orange-500/30 bg-gradient-to-br from-amber-400 via-orange-500 to-orange-600 text-white">
+            <span className="absolute -right-6 -top-6 w-28 h-28 rounded-full bg-white/15" />
+            <p className="relative text-xs font-black text-white/85 uppercase tracking-widest">Avg Response Time</p>
+            <h3 className="relative text-5xl font-black mt-3 text-white">14m</h3>
+            <p className="relative text-xs font-bold text-white/90 mt-3">↓ 2m slower vs last month</p>
         </div>
-        <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 border-t-4 border-t-rose-500">
-            <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Lost / Dropped</p>
-            <h3 className="text-3xl font-black mt-2 text-slate-800">{leads.filter(l => l.status === 'lost').length || 34}</h3>
-            <p className="text-[10px] font-bold text-slate-400 mt-2">Primarily due to Price (45%)</p>
+        <div className="pl-stat p-6 rounded-3xl shadow-lg shadow-rose-500/30 bg-gradient-to-br from-rose-500 via-pink-500 to-fuchsia-600 text-white">
+            <span className="absolute -right-6 -top-6 w-28 h-28 rounded-full bg-white/15" />
+            <p className="relative text-xs font-black text-white/85 uppercase tracking-widest">Lost / Dropped</p>
+            <h3 className="relative text-5xl font-black mt-3 text-white">{leads.filter(l => l.status === 'lost').length || 34}</h3>
+            <p className="relative text-xs font-bold text-white/90 mt-3">Primarily due to Price (45%)</p>
         </div>
       </div>
 
-      <div className="flex flex-col md:flex-row items-center gap-3 bg-white p-3 rounded-3xl border border-slate-200 shadow-sm">
+      <div className="pl-rise flex flex-col md:flex-row items-center gap-3 bg-white p-3.5 rounded-3xl border border-slate-200 shadow-lg shadow-slate-200/60">
         <div className="relative flex-1 w-full">
-          <Search className="absolute left-5 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+          <Search className="absolute left-5 top-1/2 -translate-y-1/2 text-teal-500" size={20} />
           <input
             type="text"
             placeholder="Search leads, clinical interests, or origin..."
-            className="w-full pl-14 pr-6 py-3.5 bg-slate-50 border border-transparent rounded-2xl text-sm focus:bg-white focus:border-teal-200 outline-none font-bold text-slate-700 transition-all"
+            className="w-full pl-14 pr-6 py-4 bg-slate-50 border-2 border-transparent rounded-2xl text-base focus:bg-white focus:border-teal-400 focus:ring-4 focus:ring-teal-500/10 outline-none font-bold text-slate-700 placeholder:text-slate-400 transition-all"
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
           />
         </div>
-        <button className="p-4 bg-slate-50 text-slate-400 rounded-2xl hover:text-teal-600 transition-all border border-slate-100"><Filter size={20} /></button>
+        <button className="p-4 bg-slate-50 text-slate-500 rounded-2xl hover:text-white hover:bg-gradient-to-br hover:from-teal-500 hover:to-cyan-500 hover:shadow-lg hover:shadow-teal-500/30 transition-all border border-slate-200"><Filter size={22} /></button>
       </div>
 
       {viewMode === 'BOARD' ? (
         <div className="flex gap-5 overflow-x-auto pb-10 custom-scrollbar-hide pt-2 snap-x">
           {columns.map(col => (
-            <div key={col.id} className="flex-shrink-0 w-[min(88vw,400px)] snap-start">
+            <div key={col.id} className="pl-column flex-shrink-0 w-[min(88vw,420px)] snap-start">
               <div className="flex items-center justify-between mb-6 px-4">
-                <div className="flex items-center gap-2">
-                  <span className="text-teal-600">{col.icon}</span>
-                  <h3 className="font-black text-slate-700 text-[11px] uppercase tracking-[0.2em]">{col.label}</h3>
+                <div className="flex items-center gap-3">
+                  <span className={`w-9 h-9 rounded-xl flex items-center justify-center ${(COLUMN_THEME[col.id] || COLUMN_THEME.new).icon}`}>{col.icon}</span>
+                  <h3 className="font-black text-slate-800 text-sm uppercase tracking-[0.15em]">{col.label}</h3>
                 </div>
-                <span className="text-[10px] font-black bg-slate-900 text-white px-3 py-1 rounded-lg">
+                <span className={`text-xs font-black text-white px-3.5 py-1.5 rounded-xl shadow-lg ${(COLUMN_THEME[col.id] || COLUMN_THEME.new).badge}`}>
                   {visibleLeads.filter(l => l.status === col.id).length}
                 </span>
               </div>
-              <div className="space-y-4 bg-slate-100/70 p-3 rounded-3xl min-h-[620px] border border-slate-200">
+              <div className={`space-y-4 p-3.5 rounded-3xl min-h-[620px] border-2 shadow-inner ${(COLUMN_THEME[col.id] || COLUMN_THEME.new).lane}`}>
                 {filteredLeads.filter(l => l.status === col.id).map(lead => (
                   <LeadCard key={lead.id} lead={lead} />
                 ))}
@@ -3230,34 +3276,34 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
             </div>
           ))}
           
-          <div className="flex-shrink-0 w-[min(88vw,400px)] snap-start">
+          <div className="pl-column flex-shrink-0 w-[min(88vw,420px)] snap-start">
             <div className="flex items-center justify-between mb-6 px-4">
-              <div className="flex items-center gap-2">
-                <span className="text-emerald-600"><CheckCircle2 size={14} /></span>
-                <h3 className="font-black text-slate-700 text-[11px] uppercase tracking-[0.2em]">Converted Cases</h3>
+              <div className="flex items-center gap-3">
+                <span className="w-9 h-9 rounded-xl flex items-center justify-center bg-emerald-100 text-emerald-600"><CheckCircle2 size={16} /></span>
+                <h3 className="font-black text-slate-800 text-sm uppercase tracking-[0.15em]">Converted Cases</h3>
               </div>
-              <span className="text-[10px] font-black bg-emerald-600 text-white px-3 py-1 rounded-lg">
+              <span className="text-xs font-black bg-gradient-to-r from-emerald-500 to-teal-500 shadow-lg shadow-emerald-500/40 text-white px-3.5 py-1.5 rounded-xl">
                 {visibleLeads.filter(l => l.status === 'won').length}
               </span>
             </div>
-            <div className="space-y-4 bg-emerald-50/30 p-5 rounded-[3rem] min-h-[700px] border-2 border-dashed border-emerald-100/50 opacity-60">
+            <div className="space-y-4 bg-gradient-to-b from-emerald-50 to-white p-5 rounded-[3rem] min-h-[700px] border-2 border-dashed border-emerald-300/70 opacity-90 hover:opacity-100 transition-opacity">
               {filteredLeads.filter(l => l.status === 'won').map(lead => (
                 <LeadCard key={lead.id} lead={lead} />
               ))}
             </div>
           </div>
 
-          <div className="flex-shrink-0 w-[min(88vw,400px)] snap-start">
+          <div className="pl-column flex-shrink-0 w-[min(88vw,420px)] snap-start">
             <div className="flex items-center justify-between mb-6 px-4">
-              <div className="flex items-center gap-2">
-                <span className="text-rose-600"><AlertTriangle size={14} /></span>
-                <h3 className="font-black text-slate-700 text-[11px] uppercase tracking-[0.2em]">Lost / Dropped</h3>
+              <div className="flex items-center gap-3">
+                <span className="w-9 h-9 rounded-xl flex items-center justify-center bg-rose-100 text-rose-600"><AlertTriangle size={16} /></span>
+                <h3 className="font-black text-slate-800 text-sm uppercase tracking-[0.15em]">Lost / Dropped</h3>
               </div>
-              <span className="text-[10px] font-black bg-rose-600 text-white px-3 py-1 rounded-lg">
+              <span className="text-xs font-black bg-gradient-to-r from-rose-500 to-pink-500 shadow-lg shadow-rose-500/40 text-white px-3.5 py-1.5 rounded-xl">
                 {visibleLeads.filter(l => l.status === 'lost').length}
               </span>
             </div>
-            <div className="space-y-4 bg-rose-50/30 p-5 rounded-[3rem] min-h-[700px] border-2 border-dashed border-rose-100/50 opacity-60">
+            <div className="space-y-4 bg-gradient-to-b from-rose-50 to-white p-5 rounded-[3rem] min-h-[700px] border-2 border-dashed border-rose-300/70 opacity-90 hover:opacity-100 transition-opacity">
               {filteredLeads.filter(l => l.status === 'lost').map(lead => (
                 <LeadCard key={lead.id} lead={lead} />
               ))}
@@ -3265,27 +3311,27 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
           </div>
         </div>
       ) : (
-        <div className="bg-white border border-slate-200 rounded-[3rem] overflow-hidden shadow-sm">
+        <div className="pl-rise bg-white border border-slate-200 rounded-[3rem] overflow-hidden shadow-xl shadow-slate-200/60">
           <div className="overflow-x-auto">
             <table className="w-full text-left border-collapse">
-              <thead className="bg-slate-50/80 border-b border-slate-200">
+              <thead className="bg-gradient-to-r from-teal-50 via-sky-50 to-indigo-50 border-b border-teal-100">
               <tr>
-                <th className="px-10 py-6 text-[10px] font-black text-slate-400 uppercase tracking-[0.2em]">Inquiry ID & Patient</th>
-                <th className="px-10 py-6 text-[10px] font-black text-slate-400 uppercase tracking-[0.2em]">Medical Interest</th>
-                <th className="px-10 py-6 text-[10px] font-black text-slate-400 uppercase tracking-[0.2em]">Priority & Status</th>
-                <th className="px-10 py-6 text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] text-right">Workflow</th>
+                <th className="px-10 py-6 text-xs font-black text-teal-700 uppercase tracking-[0.2em]">Inquiry ID & Patient</th>
+                <th className="px-10 py-6 text-xs font-black text-teal-700 uppercase tracking-[0.2em]">Medical Interest</th>
+                <th className="px-10 py-6 text-xs font-black text-teal-700 uppercase tracking-[0.2em]">Priority & Status</th>
+                <th className="px-10 py-6 text-xs font-black text-teal-700 uppercase tracking-[0.2em] text-right">Workflow</th>
               </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {filteredLeads.map((lead) => (
-                  <tr key={lead.id} className="hover:bg-slate-50 transition-all duration-300 group cursor-pointer" onClick={() => openLeadDetail(lead)}>
+                  <tr key={lead.id} className="hover:bg-gradient-to-r hover:from-teal-50/70 hover:to-transparent hover:shadow-inner transition-all duration-300 group cursor-pointer" onClick={() => openLeadDetail(lead)}>
                     <td className="px-10 py-8">
                       <div className="flex items-center gap-4">
-                        <div className="w-14 h-14 rounded-2xl bg-slate-100 flex items-center justify-center text-slate-500 font-black text-xl group-hover:bg-teal-600 group-hover:text-white transition-all">
+                        <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-teal-100 to-cyan-100 flex items-center justify-center text-teal-700 font-black text-xl uppercase group-hover:from-teal-500 group-hover:to-cyan-500 group-hover:text-white group-hover:scale-110 group-hover:shadow-lg group-hover:shadow-teal-500/30 transition-all">
                           {lead.name.charAt(0)}
                         </div>
                         <div>
-                          <p className="text-base font-black text-slate-900 leading-tight mb-1">{lead.name}</p>
+                          <p className="text-lg font-black text-slate-900 leading-tight mb-1 group-hover:text-teal-700 transition-colors">{lead.name}</p>
                           <p className="text-[10px] font-black text-indigo-500 tracking-widest mb-1">{getLeadCode(lead)}</p>
                           <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest flex items-center gap-1.5"><Mail size={12} /> {lead.email}</p>
                         </div>
@@ -3293,7 +3339,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                     </td>
                     <td className="px-10 py-8">
                       <div className="space-y-1">
-                        <p className="text-sm font-black text-slate-700">{lead.treatmentInterest || 'Clinical Inquiry'}</p>
+                        <p className="text-base font-black text-slate-800">{lead.treatmentInterest || 'Clinical Inquiry'}</p>
                         <p className="text-[10px] font-bold text-slate-400 uppercase flex items-center gap-1.5"><Globe size={12} /> {lead.country || 'Unknown origin'}</p>
                       </div>
                     </td>
@@ -3332,22 +3378,9 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                             BDM: {bdmNameFor(bdmIdFor(lead))}
                           </span>
                         )}
-                        {isInHouseDoctorOnly ? (
-                          <select
-                            value={inHouseIdFor(lead)}
-                            onClick={(e) => e.stopPropagation()}
-                            onChange={(e) => handleAssignInHouseDoctor(lead.id, e.target.value || null)}
-                            className="text-[9px] font-black uppercase tracking-widest px-3 py-1.5 rounded-full border border-indigo-200 bg-indigo-50 text-indigo-700"
-                            title="Assigned In-House Doctor"
-                          >
-                            <option value="">Doctor: Unassigned</option>
-                            {inHouseDoctors.map((d) => <option key={d.userId} value={d.userId}>Doctor: {d.name}</option>)}
-                          </select>
-                        ) : (
-                          <span className="text-[9px] font-black px-4 py-1.5 rounded-full uppercase tracking-widest border bg-indigo-50 text-indigo-700 border-indigo-200">
-                            Doctor: {inHouseNameFor(lead)}
-                          </span>
-                        )}
+                        <span className="text-[9px] font-black px-4 py-1.5 rounded-full uppercase tracking-widest border bg-indigo-50 text-indigo-700 border-indigo-200">
+                          Doctor: {inHouseNameFor(lead)}
+                        </span>
                       </div>
                     </td>
                     <td className="px-10 py-8 text-right">
@@ -3373,7 +3406,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
           <div ref={detailScrollRef} className="w-full max-w-3xl bg-white shadow-2xl h-screen overflow-y-auto animate-in slide-in-from-right duration-500">
             <div className="p-8 border-b border-slate-100 flex items-center justify-between sticky top-0 bg-white/80 backdrop-blur-md z-10">
               <div className="flex items-center gap-4">
-                <div className="w-14 h-14 bg-teal-600 text-white rounded-2xl flex items-center justify-center text-2xl font-black">
+                <div className="w-14 h-14 bg-gradient-to-br from-teal-400 to-cyan-600 text-white rounded-2xl flex items-center justify-center text-2xl font-black uppercase shadow-lg shadow-teal-500/30">
                   {selectedLead.name.charAt(0)}
                 </div>
                 <div>
@@ -3427,18 +3460,7 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
 
             <div className="px-10 pt-2 flex items-center gap-3 flex-wrap">
               <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Assigned In-House Doctor</p>
-              {canAssignBdm ? (
-                <select
-                  value={inHouseIdFor(selectedLead)}
-                  onChange={(e) => handleAssignInHouseDoctor(selectedLead.id, e.target.value || null)}
-                  className="text-xs font-bold border border-indigo-200 rounded-xl px-3 py-2 bg-indigo-50 text-indigo-700"
-                >
-                  <option value="">Unassigned</option>
-                  {inHouseDoctors.map((d) => <option key={d.userId} value={d.userId}>{d.name}</option>)}
-                </select>
-              ) : (
-                <span className="text-xs font-black text-slate-700">{inHouseNameFor(selectedLead)}</span>
-              )}
+              <span className="text-xs font-black text-slate-700">{inHouseNameFor(selectedLead) !== 'Unassigned' ? inHouseNameFor(selectedLead) : (localWorkflowState?.assigned_doctor_name || 'Unassigned')}</span>
             </div>
 
             <div className="p-10 space-y-12">
@@ -3707,17 +3729,6 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                                 )}
                              </div>
 
-                             <div className="p-5 bg-indigo-50/70 border border-indigo-100 rounded-3xl space-y-3">
-                                <div className="flex items-center justify-between">
-                                  <p className="text-[9px] font-black text-indigo-700 uppercase tracking-widest">AI Call Summary</p>
-                                  <button onClick={handleGenerateCallSummary} disabled={isGeneratingCallSummary} className="px-3 py-2 bg-indigo-600 text-white rounded-xl text-[9px] font-black uppercase tracking-widest disabled:opacity-60">
-                                    {isGeneratingCallSummary ? 'Generating...' : 'Generate Summary'}
-                                  </button>
-                                </div>
-                                <textarea value={aiSummaryDraft} onChange={(e) => setAiSummaryDraft(e.target.value)} placeholder="AI-generated summary will appear here for review and editing..." className="w-full p-3 bg-white border border-indigo-100 rounded-xl text-xs font-medium min-h-[110px] outline-none" />
-                                <button onClick={handleSaveCallSummary} className="text-[9px] font-black uppercase tracking-widest text-indigo-700 hover:text-indigo-900">Save reviewed summary</button>
-                             </div>
-
                              <div className="p-5 bg-white border border-slate-100 rounded-3xl space-y-3">
                                 <div className="flex items-center justify-between">
                                   <div>
@@ -3770,6 +3781,8 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                                    <p className="text-[9px] font-black text-indigo-700 uppercase tracking-widest">Assign to In-House Doctor Inbox</p>
                                    {localWorkflowState?.doctor_inbox_status === 'Assigned' && <span className="px-2 py-1 rounded-lg bg-emerald-100 text-emerald-700 text-[9px] font-black uppercase">Assigned</span>}
                                 </div>
+                                {canAssignInHouseDoctor ? (
+                                <>
                                 <select
                                   className="w-full p-3 bg-white border border-indigo-100 rounded-xl text-xs font-bold outline-none"
                                   value={selectedInHouseDoctor}
@@ -3782,7 +3795,11 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
                                 <button onClick={assignToInHouseDoctorInbox} className="w-full p-3 bg-indigo-600 text-white rounded-xl font-black text-[10px] uppercase tracking-widest hover:bg-indigo-700">
                                   <Activity size={14} className="inline mr-2" /> Assign to Doctor Inbox
                                 </button>
-                                {localWorkflowState?.assigned_doctor_name && <p className="text-[10px] font-bold text-indigo-700">Assigned doctor: {localWorkflowState.assigned_doctor_name}</p>}
+                                </>
+                                ) : (
+                                  <p className="text-xs font-black text-indigo-700">{localWorkflowState?.assigned_doctor_name || 'Not assigned yet — only the BDM can assign the in-house doctor.'}</p>
+                                )}
+                                {canAssignInHouseDoctor && localWorkflowState?.assigned_doctor_name && <p className="text-[10px] font-bold text-indigo-700">Assigned doctor: {localWorkflowState.assigned_doctor_name}</p>}
                              </div>
                              <button onClick={() => { if(validateStage(3)) handleProgressStage(); else toast.error('Complete all Stage 3 requirements before moving to Stage 4.'); }} className={`w-full p-4 rounded-2xl font-black text-[10px] uppercase tracking-widest ${validateStage(3) ? 'bg-teal-600 text-white hover:bg-teal-700 shadow-lg' : 'bg-slate-200 text-slate-400 cursor-not-allowed opacity-60'}`}>{validateStage(3) ? 'Progress to Stage 4' : 'Complete All Stage 3 Requirements'}</button>
                           </div>
@@ -4460,6 +4477,29 @@ const PatientLeads: React.FC<{ roles?: CrmRole[] }> = ({ roles = [] }) => {
               </div>
               <button type="submit" className="w-full py-5 bg-teal-600 text-white rounded-[1.5rem] font-black text-xs uppercase tracking-widest shadow-xl hover:bg-teal-700 transition-all">Onboard Inquiry</button>
             </form>
+          </div>
+        </div>
+      )}
+
+      {showStage3Handover && (
+        <div className="fixed inset-0 z-[230] flex items-center justify-center p-4 bg-slate-900/80 backdrop-blur-xl animate-in fade-in duration-300">
+          <div className="w-full max-w-md bg-white rounded-[2rem] p-8 text-center shadow-2xl space-y-5">
+            <div className="mx-auto w-14 h-14 rounded-full bg-teal-50 text-teal-600 flex items-center justify-center">
+              <CheckCircle2 size={30} />
+            </div>
+            <div className="space-y-2">
+              <h3 className="text-xl font-black text-slate-900">Your work is done here</h3>
+              <p className="text-sm font-semibold text-slate-500">
+                Stage 3 is complete and the lead has moved to Stage 4. Stage 4 and Stage 5 will now be handled by the in-house doctor
+                {localWorkflowState?.assigned_doctor_name ? ` (${localWorkflowState.assigned_doctor_name})` : ''}. You will take the lead over again at Stage 6 once the clinical review is finalized.
+              </p>
+            </div>
+            <button
+              onClick={() => setShowStage3Handover(false)}
+              className="w-full py-4 bg-teal-600 text-white rounded-2xl font-black text-xs uppercase tracking-widest hover:bg-teal-700 transition-all"
+            >
+              OK
+            </button>
           </div>
         </div>
       )}
